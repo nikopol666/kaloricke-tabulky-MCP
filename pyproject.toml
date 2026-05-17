@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaloricke-tabulky-mcp"
+version = "0.1.0"
+description = "MCP server for Kaloricke Tabulky food diary search and writes"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "nikopol666" }]
+dependencies = [
+    "aiohttp>=3.9,<4",
+    "mcp>=1.8,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.2,<3",
+    "starlette>=0.37,<1",
+    "uvicorn>=0.29,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-aiohttp>=1.0,<2",
+    "pyyaml>=6.0,<7",
+]
+
+[project.scripts]
+kaloricke-tabulky-mcp = "kaloricke_tabulky_mcp.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+

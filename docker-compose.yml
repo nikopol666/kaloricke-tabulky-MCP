@@ -1,0 +1,31 @@
+services:
+  kaloricke-tabulky-mcp:
+    image: ghcr.io/nikopol666/kaloricke-tabulky-mcp:latest
+    container_name: kaloricke-tabulky-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_HTTP_PORT:-8080}:8080"
+    environment:
+      KT_ACCOUNTS: ${KT_ACCOUNTS:?set KT_ACCOUNTS}
+      KT_DEFAULT_ACCOUNT: ${KT_DEFAULT_ACCOUNT:-}
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-Kaloricke Tabulky MCP}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8080
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      KT_ACCOUNT_PERSONAL_EMAIL: ${KT_ACCOUNT_PERSONAL_EMAIL:-}
+      KT_ACCOUNT_PERSONAL_PASSWORD: ${KT_ACCOUNT_PERSONAL_PASSWORD:-}
+      KT_ACCOUNT_PARTNER_EMAIL: ${KT_ACCOUNT_PARTNER_EMAIL:-}
+      KT_ACCOUNT_PARTNER_PASSWORD: ${KT_ACCOUNT_PARTNER_PASSWORD:-}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+

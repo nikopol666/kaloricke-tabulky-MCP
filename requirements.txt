@@ -1,0 +1,7 @@
+aiohttp>=3.9,<4
+mcp>=1.8,<2
+pydantic>=2.7,<3
+pydantic-settings>=2.2,<3
+starlette>=0.37,<1
+uvicorn>=0.29,<1
+
