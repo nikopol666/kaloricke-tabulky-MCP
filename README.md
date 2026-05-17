@@ -11,6 +11,7 @@ The server is designed for assistant workflows such as "record these Mealie-deri
 - Every write tool requires an explicit `account`.
 - Write tools never write by default.
 - Actual writes happen only when `commit=true`.
+- Streamable HTTP `/mcp` can be protected with `MCP_BEARER_TOKEN`.
 - `/health` checks process/config liveness only. It does not log in, search, or write.
 - Active credential validation is exposed as the explicit `check_account_auth(account)` tool.
 
@@ -39,10 +40,12 @@ KT_ACCOUNT_PERSONAL_PASSWORD=replace-me
 KT_ACCOUNT_PARTNER_EMAIL=partner@example.com
 KT_ACCOUNT_PARTNER_PASSWORD=replace-me
 KT_DEFAULT_ACCOUNT=personal
+MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
 
 Aliases are normalized to lowercase underscores. Collisions such as `my-account` and `my_account` are rejected.
+When `MCP_BEARER_TOKEN` is set, MCP clients must send `Authorization: Bearer <token>` to `/mcp`. `/health` stays unauthenticated for container healthchecks.
 
 ## Tools
 
@@ -136,4 +139,3 @@ python -m kaloricke_tabulky_mcp.main --transport streamable-http
 ## Notes
 
 This project is not affiliated with Kaloricke Tabulky. It uses unofficial web endpoints that may change without notice.
-

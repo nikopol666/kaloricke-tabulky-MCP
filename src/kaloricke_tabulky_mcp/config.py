@@ -25,6 +25,7 @@ class Settings:
     mcp_server_name: str
     mcp_host: str
     mcp_port: int
+    mcp_bearer_token: str | None
     request_timeout: int
     max_retries: int
     log_level: str
@@ -40,6 +41,7 @@ class RawSettings(BaseSettings):
     mcp_server_name: str = Field(default="Kaloricke Tabulky MCP")
     mcp_host: str = Field(default="0.0.0.0")
     mcp_port: int = Field(default=8080)
+    mcp_bearer_token: str | None = Field(default=None)
     request_timeout: int = Field(default=30)
     max_retries: int = Field(default=3)
     log_level: str = Field(default="INFO")
@@ -56,6 +58,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
                 "mcp_server_name": source.get("MCP_SERVER_NAME", "Kaloricke Tabulky MCP"),
                 "mcp_host": source.get("MCP_HOST", "0.0.0.0"),
                 "mcp_port": int(source.get("MCP_PORT", "8080")),
+                "mcp_bearer_token": source.get("MCP_BEARER_TOKEN"),
                 "request_timeout": int(source.get("REQUEST_TIMEOUT", "30")),
                 "max_retries": int(source.get("MAX_RETRIES", "3")),
                 "log_level": source.get("LOG_LEVEL", "INFO"),
@@ -71,6 +74,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         mcp_server_name=raw.mcp_server_name,
         mcp_host=raw.mcp_host,
         mcp_port=raw.mcp_port,
+        mcp_bearer_token=_clean_optional_secret(raw.mcp_bearer_token),
         request_timeout=raw.request_timeout,
         max_retries=raw.max_retries,
         log_level=raw.log_level,
@@ -119,3 +123,9 @@ def _normalize_alias(value: str | None) -> str:
 def _env_suffix(alias: str) -> str:
     return alias.upper()
 
+
+def _clean_optional_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None

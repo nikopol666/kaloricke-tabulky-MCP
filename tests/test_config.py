@@ -14,12 +14,14 @@ def test_loads_multiple_accounts_and_default() -> None:
             "KT_ACCOUNT_PARTNER_EMAIL": "partner@example.com",
             "KT_ACCOUNT_PARTNER_PASSWORD": "secret-two",
             "KT_DEFAULT_ACCOUNT": "personal",
+            "MCP_BEARER_TOKEN": " mcp-secret ",
         }
     )
 
     assert sorted(settings.accounts) == ["partner", "personal"]
     assert settings.default_account == "personal"
     assert settings.accounts["personal"].safe_dict()["email"] == "u***@example.com"
+    assert settings.mcp_bearer_token == "mcp-secret"
 
 
 def test_rejects_alias_collision() -> None:
@@ -43,4 +45,3 @@ def test_default_account_must_exist() -> None:
                 "KT_DEFAULT_ACCOUNT": "missing",
             }
         )
-

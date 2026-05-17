@@ -8,6 +8,7 @@ services:
     environment:
       KT_ACCOUNTS: ${KT_ACCOUNTS:?set KT_ACCOUNTS}
       KT_DEFAULT_ACCOUNT: ${KT_DEFAULT_ACCOUNT:-}
+      MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:-}
       MCP_SERVER_NAME: ${MCP_SERVER_NAME:-Kaloricke Tabulky MCP}
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8080
@@ -28,4 +29,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-

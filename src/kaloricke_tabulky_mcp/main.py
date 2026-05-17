@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .account_registry import AccountRegistry
+from .auth import BearerTokenMiddleware
 from .config import ConfigError, load_settings
 from .tools import setup_tools
 
@@ -66,11 +67,33 @@ def _add_health_route(mcp: FastMCP, account_registry: AccountRegistry) -> None:
                     "port": account_registry.settings.mcp_port,
                     "transport": "streamable-http",
                     "endpoint": "/mcp",
+                    "bearer_auth": bool(account_registry.settings.mcp_bearer_token),
                 },
                 **account_registry.safe_health(),
             },
             status_code=200,
         )
+
+
+async def _run_streamable_http(mcp: FastMCP) -> None:  # pragma: no cover
+    import uvicorn
+
+    starlette_app = mcp.streamable_http_app()
+    if registry is not None and registry.settings.mcp_bearer_token:
+        starlette_app = BearerTokenMiddleware(
+            starlette_app,
+            token=registry.settings.mcp_bearer_token,
+            protected_paths=("/mcp",),
+        )
+
+    config = uvicorn.Config(
+        starlette_app,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 async def main() -> None:
@@ -91,7 +114,7 @@ async def main() -> None:
     if args.transport == "stdio":
         await mcp.run_stdio_async()
     else:
-        await mcp.run_streamable_http_async()
+        await _run_streamable_http(mcp)
 
 
 def cli() -> None:
@@ -100,4 +123,3 @@ def cli() -> None:
 
 if __name__ == "__main__":
     cli()
-
