@@ -289,8 +289,9 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             "commit_required_for_write": True,
             "recipe_endpoint_status": "not_verified",
             "next_step": (
-                "Capture the Kaloricke Tabulky custom recipe create/save network "
-                "requests before enabling writes."
+                "Run probe_user_meal_endpoints(account) in the live authenticated "
+                "deployment, then capture the exact custom recipe create/save POST "
+                "URL and payload before enabling writes."
             ),
             "servings": request.servings,
             "total_weight_g": request.total_weight_g,

@@ -57,6 +57,15 @@ Lists safe account aliases and masked email addresses.
 
 Runs an explicit login check for one configured account.
 
+### `probe_user_meal_endpoints(account)`
+
+Read-only diagnostic for discovering the private custom meal/recipe creation
+surface from an authenticated KT account. It fetches only page/form URLs such as
+`/user/recipe/add`, `/user/foodstuff-meal/create`, and
+`/user/settings/meal/detail/0`, then returns form actions, input names, script
+URLs, and endpoint-like strings. It does not call `add`/`save` JSON endpoints and
+does not create recipes.
+
 ### `search_food(query, account=None, kind="food", page=0, limit=10)`
 
 Searches food or drink entries. `kind` is `food` or `drink`.

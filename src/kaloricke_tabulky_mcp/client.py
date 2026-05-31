@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import md5
+from html import unescape
 from http.cookies import SimpleCookie
 from math import isfinite
 import re
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
 
@@ -23,12 +24,13 @@ FOOD_FORM_URL = (
     "https://www.kaloricketabulky.cz/user/foodstuff/add/form/{guid}/{date}/get?format=json"
 )
 RECORD_FOOD_URL = "https://www.kaloricketabulky.cz/user/foodstuff/add?format=json&="
+BASE_URL = "https://www.kaloricketabulky.cz/"
 USER_MEAL_PROBE_URLS = (
+    "https://www.kaloricketabulky.cz/user/recipe/add",
+    "https://www.kaloricketabulky.cz/user/recipe/create",
+    "https://www.kaloricketabulky.cz/user/foodstuff-meal/create",
     "https://www.kaloricketabulky.cz/user/settings/meal",
     "https://www.kaloricketabulky.cz/user/settings/meal/detail/0",
-    "https://www.kaloricketabulky.cz/user/settings/meal/detail/0/get?format=json",
-    "https://www.kaloricketabulky.cz/user/settings/meal/add?format=json",
-    "https://www.kaloricketabulky.cz/user/settings/meal/save?format=json",
 )
 
 SEARCH_KINDS = {"food": "foodstuff-meal", "drink": "drink"}
@@ -389,7 +391,7 @@ class KalorickeTabulkyClient:
         }
 
     async def probe_user_meal_endpoints(self) -> dict[str, Any]:
-        """Read authenticated user-meal pages to discover private form endpoints."""
+        """Read authenticated custom meal/recipe pages to discover private form endpoints."""
         probes = []
         discovered: set[str] = set()
         for url in USER_MEAL_PROBE_URLS:
@@ -400,15 +402,25 @@ class KalorickeTabulkyClient:
             probes.append(
                 {
                     **result,
-                    "snippet": _safe_probe_snippet(text),
+                    "title": _html_title(text),
+                    "login_page": "/login" in str(result.get("location") or "")
+                    or "Přihlášení" in text[:5000],
+                    "forms": _extract_probe_forms(text),
+                    "scripts": _extract_probe_scripts(text),
                     "candidate_endpoints": endpoints,
                 }
             )
         return {
             "account": self.alias,
             "mode": "read_only_probe",
+            "write_performed": False,
             "probes": probes,
             "candidate_endpoints": sorted(discovered),
+            "blocked_write_reason": (
+                "Custom recipe creation still needs a verified authenticated POST "
+                "URL and payload. This tool only reads candidate form pages and "
+                "does not call add/save JSON endpoints."
+            ),
         }
 
     async def _request_with_reauth(
@@ -894,18 +906,79 @@ def _find_unit_option(
 def _extract_candidate_endpoints(text: str) -> list[str]:
     endpoints = set()
     patterns = (
-        r"['\"]([^'\"]*(?:user/settings/meal|user/meal|/meal/|/recipe/|foodstuff)[^'\"]*)['\"]",
-        r"\b((?:/)?(?:user/settings/meal|user/meal|meal|recipe|foodstuff)[^\\s'\"<>)]*)",
+        r"['\"]([^'\"]*(?:user/recipe|user/settings/meal|user/meal|/meal/|/recipe/|foodstuff)[^'\"]*)['\"]",
+        r"\b((?:/)?(?:user/recipe|user/settings/meal|user/meal|meal|recipe|foodstuff)[^\\s'\"<>)]*)",
     )
     for pattern in patterns:
         for match in re.finditer(pattern, text):
-            endpoint = match.group(1).replace("\\/", "/")
+            endpoint = unescape(match.group(1).replace("\\/", "/"))
             if len(endpoint) > 240:
                 continue
             if any(token in endpoint.lower() for token in ("password", "email", "cookie")):
                 continue
-            endpoints.add(endpoint)
+            endpoints.add(_redact_query_values(endpoint))
     return sorted(endpoints)
+
+
+def _extract_probe_forms(text: str) -> list[dict[str, Any]]:
+    forms = []
+    for match in re.finditer(r"<form\b(?P<attrs>.*?)>", text, re.IGNORECASE | re.DOTALL):
+        attrs = _html_attrs(match.group("attrs"))
+        action = attrs.get("action")
+        forms.append(
+            {
+                "method": (attrs.get("method") or "get").lower(),
+                "action": _redact_query_values(urljoin(BASE_URL, action)) if action else None,
+                "input_names": _form_input_names(text, match.end()),
+            }
+        )
+    return forms
+
+
+def _extract_probe_scripts(text: str) -> list[str]:
+    scripts = [
+        urljoin(BASE_URL, unescape(src))
+        for src in re.findall(r"<script[^>]+src=[\"']([^\"']+)", text, re.IGNORECASE)
+    ]
+    return _dedupe(scripts)
+
+
+def _html_attrs(text: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in re.finditer(r"([\w:-]+)\s*=\s*([\"'])(.*?)\2", text, re.DOTALL):
+        attrs[match.group(1).lower()] = unescape(match.group(3))
+    return attrs
+
+
+def _form_input_names(text: str, form_start: int) -> list[str]:
+    close = text.find("</form>", form_start)
+    if close == -1:
+        close = min(len(text), form_start + 20000)
+    form_html = text[form_start:close]
+    names = re.findall(r"<(?:input|select|textarea)\b[^>]*\bname=[\"']([^\"']+)", form_html, re.I)
+    return _dedupe(unescape(name) for name in names)
+
+
+def _html_title(text: str) -> str | None:
+    match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return re.sub(r"\s+", " ", unescape(match.group(1))).strip()[:160]
+
+
+def _redact_query_values(value: str) -> str:
+    return re.sub(r"([?&][^=&]+)=([^&#]*)", r"\1=<redacted>", value)
+
+
+def _dedupe(values: Any) -> list[Any]:
+    result: list[Any] = []
+    seen: set[Any] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _safe_probe_snippet(text: str) -> str:
