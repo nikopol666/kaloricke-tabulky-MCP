@@ -159,6 +159,70 @@ class RecordFoodBatchRequest(StrictModel):
         return data
 
 
+class RecipeIngredientItem(BatchFoodItem):
+    pass
+
+
+class PrepareRecipeImportRequest(StrictModel):
+    account: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    ingredients: list[RecipeIngredientItem] = Field(min_length=1, max_length=100)
+    servings: float | None = None
+    total_weight_g: float | None = None
+    source: str | None = None
+    source_id: str | None = None
+    continue_on_error: bool = True
+
+    @field_validator("servings", "total_weight_g", mode="before")
+    @classmethod
+    def _positive_optional(cls, value: float | None) -> float | None:
+        return validate_amount(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_item_account_override(cls, data: object) -> object:
+        if isinstance(data, dict):
+            for item in data.get("ingredients", []) or []:
+                if isinstance(item, dict) and "account" in item:
+                    raise ValueError("Recipe ingredients must not override account")
+        return data
+
+
+class RecordRecipeServingRequest(StrictModel):
+    account: str = Field(min_length=1)
+    date: Date = Field(default_factory=Date.today)
+    meal_type: str | None = None
+    time: str | None = None
+    query: str | None = None
+    recipe_guid: str | None = None
+    food_guid: str | None = None
+    amount: float | None = None
+    unit: str | None = None
+    unit_guid: str | None = None
+    commit: bool = False
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def _date(cls, value: str | Date | None) -> Date:
+        return parse_date(value)
+
+    @field_validator("time", mode="before")
+    @classmethod
+    def _time(cls, value: str | None) -> str | None:
+        return parse_time(value)
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _amount(cls, value: float | None) -> float | None:
+        return validate_amount(value)
+
+    @model_validator(mode="after")
+    def _has_recipe_reference(self) -> "RecordRecipeServingRequest":
+        if not self.recipe_guid and not self.food_guid and not self.query:
+            raise ValueError("Set recipe_guid, food_guid, or query")
+        return self
+
+
 class DiarySummaryRequest(StrictModel):
     account: str | None = None
     date: Date = Field(default_factory=Date.today)

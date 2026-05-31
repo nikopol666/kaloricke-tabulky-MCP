@@ -101,3 +101,64 @@ async def test_record_food_with_commit_writes_once() -> None:
     assert result["status"] == "written"
     assert registry.client.write_calls == 1
 
+
+@pytest.mark.asyncio
+async def test_prepare_recipe_import_is_preview_only() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["prepare_recipe_import"](
+        account="personal",
+        title="Test recept",
+        ingredients=[
+            {"name": "rýže", "amount": 100, "unit": "g", "source": "mealie"},
+            {"name": "kuřecí prsa", "amount": 150, "unit": "g", "source": "mealie"},
+        ],
+        servings=2,
+        source="mealie",
+        source_id="recipe-1",
+    )
+
+    assert result["mode"] == "preview"
+    assert result["write_supported"] is False
+    assert result["recipe_endpoint_status"] == "not_verified"
+    assert result["success_count"] == 2
+    assert registry.client.write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_record_recipe_serving_preview_does_not_write() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["record_recipe_serving"](
+        account="personal",
+        date="2026-06-01",
+        query="Lasagne podle Mealie",
+        amount=1,
+        unit="porce",
+    )
+
+    assert result["mode"] == "preview"
+    assert registry.client.write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_record_recipe_serving_commit_writes_once() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["record_recipe_serving"](
+        account="personal",
+        date="2026-06-01",
+        recipe_guid="recipe-guid-1",
+        amount=1,
+        unit="porce",
+        commit=True,
+    )
+
+    assert result["status"] == "written"
+    assert registry.client.write_calls == 1

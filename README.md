@@ -108,6 +108,63 @@ Normalized payload suitable for Mealie/assistant workflows:
 
 Add `"commit": true` only after reviewing the preview.
 
+### `prepare_recipe_import(account, title, ingredients, ...)`
+
+Preview-only helper for Mealie-to-Kaloricke Tabulky recipe work. It resolves each
+recipe ingredient to a Kaloricke Tabulky food payload and returns the matched
+`food_guid`, unit selection, multiplier, and source metadata.
+
+This tool does not create a Kaloricke Tabulky custom recipe yet. The upstream
+custom recipe create/save endpoint is private and must be verified from the web
+app network requests before writes are enabled.
+
+```json
+{
+  "account": "personal",
+  "title": "Lasagne podle Mealie",
+  "servings": 4,
+  "source": "mealie",
+  "source_id": "lasagne",
+  "ingredients": [
+    {"name": "mleté hovězí maso", "amount": 500, "unit": "g", "source": "mealie"},
+    {"name": "krájená rajčata", "amount": 400, "unit": "g", "source": "mealie"}
+  ]
+}
+```
+
+### `record_recipe_serving(...)`
+
+Previews or records a serving of a Kaloricke Tabulky custom recipe after the
+recipe exists in the account. Custom recipes are resolved through the same
+Kaloricke Tabulky food/meal lookup and diary add flow as regular foods.
+
+Preview:
+
+```json
+{
+  "account": "personal",
+  "date": "2026-06-01",
+  "meal_type": "dinner",
+  "query": "Lasagne podle Mealie",
+  "amount": 1,
+  "unit": "porce"
+}
+```
+
+Write:
+
+```json
+{
+  "account": "personal",
+  "date": "2026-06-01",
+  "meal_type": "dinner",
+  "recipe_guid": "resolved-or-created-kt-guid",
+  "amount": 1,
+  "unit": "porce",
+  "commit": true
+}
+```
+
 ### `get_diary_summary(account=None, date=None)`
 
 Returns daily summary metrics.
