@@ -47,6 +47,15 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         return await registry.check_auth(account)
 
     @mcp.tool()
+    async def probe_user_meal_endpoints(account: str) -> dict[str, Any]:
+        """Read-only probe for private KT custom meal/recipe form endpoints."""
+        try:
+            client = registry.get_write_client(account)
+            return await client.probe_user_meal_endpoints()
+        except (ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
     async def search_food(
         query: str,
         account: str | None = None,

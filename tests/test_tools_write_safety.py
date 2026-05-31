@@ -42,6 +42,14 @@ class FakeClient:
         self.write_calls += 1
         return {"message": "ok", "food_guid": resolved["food_guid"]}
 
+    async def probe_user_meal_endpoints(self):
+        return {
+            "account": self.alias,
+            "mode": "read_only_probe",
+            "probes": [],
+            "candidate_endpoints": [],
+        }
+
 
 class FakeRegistry:
     def __init__(self) -> None:
@@ -124,6 +132,18 @@ async def test_prepare_recipe_import_is_preview_only() -> None:
     assert result["write_supported"] is False
     assert result["recipe_endpoint_status"] == "not_verified"
     assert result["success_count"] == 2
+    assert registry.client.write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_probe_user_meal_endpoints_is_read_only() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["probe_user_meal_endpoints"](account="personal")
+
+    assert result["mode"] == "read_only_probe"
     assert registry.client.write_calls == 0
 
 

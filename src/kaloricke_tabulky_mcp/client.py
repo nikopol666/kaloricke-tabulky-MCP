@@ -23,6 +23,13 @@ FOOD_FORM_URL = (
     "https://www.kaloricketabulky.cz/user/foodstuff/add/form/{guid}/{date}/get?format=json"
 )
 RECORD_FOOD_URL = "https://www.kaloricketabulky.cz/user/foodstuff/add?format=json&="
+USER_MEAL_PROBE_URLS = (
+    "https://www.kaloricketabulky.cz/user/settings/meal",
+    "https://www.kaloricketabulky.cz/user/settings/meal/detail/0",
+    "https://www.kaloricketabulky.cz/user/settings/meal/detail/0/get?format=json",
+    "https://www.kaloricketabulky.cz/user/settings/meal/add?format=json",
+    "https://www.kaloricketabulky.cz/user/settings/meal/save?format=json",
+)
 
 SEARCH_KINDS = {"food": "foodstuff-meal", "drink": "drink"}
 
@@ -381,6 +388,29 @@ class KalorickeTabulkyClient:
             "search_result": resolved.get("search_result"),
         }
 
+    async def probe_user_meal_endpoints(self) -> dict[str, Any]:
+        """Read authenticated user-meal pages to discover private form endpoints."""
+        probes = []
+        discovered: set[str] = set()
+        for url in USER_MEAL_PROBE_URLS:
+            result = await self._request_text_with_reauth("GET", url)
+            text = result.pop("text")
+            endpoints = _extract_candidate_endpoints(text)
+            discovered.update(endpoints)
+            probes.append(
+                {
+                    **result,
+                    "snippet": _safe_probe_snippet(text),
+                    "candidate_endpoints": endpoints,
+                }
+            )
+        return {
+            "account": self.alias,
+            "mode": "read_only_probe",
+            "probes": probes,
+            "candidate_endpoints": sorted(discovered),
+        }
+
     async def _request_with_reauth(
         self, method: str, url: str, **kwargs: Any
     ) -> dict[str, Any]:
@@ -425,6 +455,31 @@ class KalorickeTabulkyClient:
         if isinstance(body, dict) and body.get("code") not in (None, 0):
             raise KalorickeTabulkyError(body.get("message") or f"Unexpected API response: {body}")
         return body
+
+    async def _request_text_with_reauth(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        if self._cookies is None:
+            await self.authenticate()
+
+        result = await self._request_text(method, url, **kwargs)
+        if result["status"] in (301, 302, 303, 307, 308):
+            await self.authenticate()
+            result = await self._request_text(method, url, **kwargs)
+        return result
+
+    async def _request_text(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        headers = dict(kwargs.pop("headers", {}))
+        headers["Cookie"] = self._cookies or ""
+        response = await self._session.request(
+            method, url, headers=headers, allow_redirects=False, **kwargs
+        )
+        text = await response.text()
+        return {
+            "url": url,
+            "status": response.status,
+            "content_type": response.headers.get("Content-Type", ""),
+            "location": response.headers.get("Location"),
+            "text": text,
+        }
 
     @staticmethod
     async def _json_response(response: ClientResponse) -> Any:
@@ -836,6 +891,50 @@ def _find_unit_option(
     return None
 
 
+def _extract_candidate_endpoints(text: str) -> list[str]:
+    endpoints = set()
+    patterns = (
+        r"['\"]([^'\"]*(?:user/settings/meal|user/meal|/meal/|/recipe/|foodstuff)[^'\"]*)['\"]",
+        r"\b((?:/)?(?:user/settings/meal|user/meal|meal|recipe|foodstuff)[^\\s'\"<>)]*)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            endpoint = match.group(1).replace("\\/", "/")
+            if len(endpoint) > 240:
+                continue
+            if any(token in endpoint.lower() for token in ("password", "email", "cookie")):
+                continue
+            endpoints.add(endpoint)
+    return sorted(endpoints)
+
+
+def _safe_probe_snippet(text: str) -> str:
+    compact = re.sub(r"\s+", " ", text)
+    focus_terms = (
+        "user/settings/meal",
+        "foodstuff",
+        "ingredient",
+        "ingredience",
+        "surovin",
+        "form",
+        "ng-controller",
+    )
+    snippets = []
+    for term in focus_terms:
+        index = compact.lower().find(term.lower())
+        if index < 0:
+            continue
+        snippets.append(compact[max(0, index - 220) : index + 500])
+        if len(snippets) >= 3:
+            break
+    snippet = "\n---\n".join(snippets) if snippets else compact[:900]
+    return re.sub(
+        r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[A-Za-z0-9.-]+)",
+        r"\1***\3",
+        snippet,
+    )[:3000]
+
+
 def _mask_email(email: str) -> str:
     if "@" not in email:
         return "***"
@@ -843,4 +942,3 @@ def _mask_email(email: str) -> str:
     if not name:
         return f"***@{domain}"
     return f"{name[0]}***@{domain}"
-
