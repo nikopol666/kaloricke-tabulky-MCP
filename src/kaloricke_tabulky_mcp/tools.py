@@ -327,6 +327,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         title: str,
         ingredients: list[dict[str, Any]],
         servings: float | None = None,
+        recipe_guid: str | None = None,
         preparation_time_minutes: int | None = None,
         visibility: str = "private",
         description: list[str] | None = None,
@@ -348,6 +349,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 title=title,
                 ingredients=ingredients,
                 servings=servings,
+                recipe_guid=recipe_guid,
                 preparation_time_minutes=preparation_time_minutes,
                 visibility=visibility,  # type: ignore[arg-type]
                 description=description,
@@ -405,6 +407,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     preparation_time_minutes=request.preparation_time_minutes,
                     visibility=request.visibility,
                     description=request.description,
+                    recipe_guid=request.recipe_guid or "0",
                 )
             except KalorickeTabulkyError as err:
                 return _error(err)
@@ -415,7 +418,10 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             "mode": "commit" if request.commit else "preview",
             "commit_required_for_write": True,
             "write_supported": True,
-            "recipe_endpoint": "/user/settings/meal/detail/edit/0?format=json",
+            "recipe_guid": request.recipe_guid,
+            "recipe_endpoint": (
+                f"/user/settings/meal/detail/edit/{request.recipe_guid or '0'}?format=json"
+            ),
             "servings": request.servings,
             "preparation_time_minutes": request.preparation_time_minutes,
             "visibility": request.visibility,
@@ -436,6 +442,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 title=request.title,
                 resolved_ingredients=resolved_ingredients,
                 servings=request.servings,
+                recipe_guid=request.recipe_guid,
                 preparation_time_minutes=request.preparation_time_minutes,
                 visibility=request.visibility,
                 description=request.description,

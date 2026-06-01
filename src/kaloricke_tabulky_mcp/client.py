@@ -575,10 +575,12 @@ class KalorickeTabulkyClient:
         title: str,
         resolved_ingredients: list[dict[str, Any]],
         servings: float | None,
+        recipe_guid: str | None = None,
         preparation_time_minutes: int | None = None,
         visibility: str = "private",
         description: list[str] | None = None,
     ) -> dict[str, Any]:
+        edit_guid = recipe_guid or "0"
         payload = self.build_custom_recipe_payload(
             title=title,
             resolved_ingredients=resolved_ingredients,
@@ -586,20 +588,21 @@ class KalorickeTabulkyClient:
             preparation_time_minutes=preparation_time_minutes,
             visibility=visibility,
             description=description,
+            recipe_guid=edit_guid,
         )
         response = await self._request_with_reauth(
             "POST",
-            CUSTOM_RECIPE_EDIT_URL.format(guid="0"),
+            CUSTOM_RECIPE_EDIT_URL.format(guid=edit_guid),
             json=payload,
             headers={"Accept": "application/json, text/plain, */*"},
         )
         return {
             "message": response.get("message"),
-            "recipe_guid": response.get("data"),
+            "recipe_guid": response.get("data") or recipe_guid,
             "title": title,
             "servings": servings,
             "ingredient_count": len(resolved_ingredients),
-            "endpoint": "/user/settings/meal/detail/edit/0?format=json",
+            "endpoint": f"/user/settings/meal/detail/edit/{edit_guid}?format=json",
         }
 
     async def list_custom_recipes(

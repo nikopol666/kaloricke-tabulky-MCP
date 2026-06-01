@@ -196,6 +196,7 @@ class PrepareRecipeImportRequest(StrictModel):
 
 
 class CreateCustomRecipeRequest(PrepareRecipeImportRequest):
+    recipe_guid: str | None = None
     preparation_time_minutes: int | None = Field(default=None, ge=0, le=1440)
     visibility: Literal["private", "public"] = "private"
     description: list[str] | None = None

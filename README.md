@@ -147,8 +147,10 @@ matches before calling `create_custom_recipe`.
 
 ### `create_custom_recipe(...)`
 
-Previews or creates a real private Kaloricke Tabulky custom recipe. The write
-endpoint is `/user/settings/meal/detail/edit/0?format=json`; writes happen only
+Previews or creates a real private Kaloricke Tabulky custom recipe. By default
+the write endpoint is `/user/settings/meal/detail/edit/0?format=json`; pass
+`recipe_guid` to update an existing custom recipe through
+`/user/settings/meal/detail/edit/{recipe_guid}?format=json`. Writes happen only
 with `"commit": true`. KT calculates nutrition from the resolved ingredient
 items.
 
@@ -156,6 +158,7 @@ items.
 {
   "account": "personal",
   "title": "Lasagne podle Mealie",
+  "recipe_guid": "optional-existing-custom-recipe-guid",
   "servings": 4,
   "preparation_time_minutes": 60,
   "source": "mealie",

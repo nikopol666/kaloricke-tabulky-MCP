@@ -76,6 +76,7 @@ class FakeClient:
 
     def build_custom_recipe_payload(self, **kwargs):
         return {
+            "guid": kwargs.get("recipe_guid") or "0",
             "title": kwargs["title"],
             "portions": str(int(kwargs["servings"] or 1)),
             "items": [
@@ -93,7 +94,7 @@ class FakeClient:
         self.recipe_write_calls += 1
         return {
             "message": "[recipe.save.success (cs)]",
-            "recipe_guid": "recipe-guid-1",
+            "recipe_guid": kwargs.get("recipe_guid") or "recipe-guid-1",
             "title": kwargs["title"],
             "ingredient_count": len(kwargs["resolved_ingredients"]),
         }
@@ -236,6 +237,29 @@ async def test_create_custom_recipe_without_commit_does_not_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_custom_recipe_preview_can_target_existing_recipe() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["create_custom_recipe"](
+        account="personal",
+        title="Test recept",
+        recipe_guid="existing-recipe-guid",
+        ingredients=[{"name": "rýže", "amount": 100, "unit": "g"}],
+        servings=2,
+    )
+
+    assert result["mode"] == "preview"
+    assert result["recipe_guid"] == "existing-recipe-guid"
+    assert result["recipe_endpoint"] == (
+        "/user/settings/meal/detail/edit/existing-recipe-guid?format=json"
+    )
+    assert result["payload_summary"]["guid"] == "existing-recipe-guid"
+    assert registry.client.recipe_write_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_create_custom_recipe_can_include_diagnostic_payload() -> None:
     mcp = FakeMCP()
     registry = FakeRegistry()
@@ -269,6 +293,26 @@ async def test_create_custom_recipe_with_commit_writes_once() -> None:
 
     assert result["status"] == "written"
     assert result["recipe_guid"] == "recipe-guid-1"
+    assert registry.client.recipe_write_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_custom_recipe_commit_can_update_existing_recipe() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["create_custom_recipe"](
+        account="personal",
+        title="Test recept",
+        recipe_guid="existing-recipe-guid",
+        ingredients=[{"name": "rýže", "amount": 100, "unit": "g"}],
+        servings=2,
+        commit=True,
+    )
+
+    assert result["status"] == "written"
+    assert result["recipe_guid"] == "existing-recipe-guid"
     assert registry.client.recipe_write_calls == 1
 
 
