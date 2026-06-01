@@ -70,6 +70,13 @@ does not create recipes.
 
 Searches food or drink entries. `kind` is `food` or `drink`.
 
+### `list_custom_recipes(account, query="", page=0, limit=50)`
+
+Lists private custom recipes/meals from
+`/user/settings/meal/list?format=json&page=...&limit=...&query=...`. Use this
+after `create_custom_recipe` to verify the recipe exists and to retrieve its
+`recipe_guid` for `record_recipe_serving`.
+
 ### `record_food(...)`
 
 Preview:
@@ -119,13 +126,10 @@ Add `"commit": true` only after reviewing the preview.
 
 ### `prepare_recipe_import(account, title, ingredients, ...)`
 
-Preview-only helper for Mealie-to-Kaloricke Tabulky recipe work. It resolves each
+Preview helper for Mealie-to-Kaloricke Tabulky recipe work. It resolves each
 recipe ingredient to a Kaloricke Tabulky food payload and returns the matched
-`food_guid`, unit selection, multiplier, and source metadata.
-
-This tool does not create a Kaloricke Tabulky custom recipe yet. The upstream
-custom recipe create/save endpoint is private and must be verified from the web
-app network requests before writes are enabled.
+`food_guid`, unit selection, multiplier, and source metadata. Use this to review
+matches before calling `create_custom_recipe`.
 
 ```json
 {
@@ -140,6 +144,34 @@ app network requests before writes are enabled.
   ]
 }
 ```
+
+### `create_custom_recipe(...)`
+
+Previews or creates a real private Kaloricke Tabulky custom recipe. The write
+endpoint is `/user/settings/meal/detail/edit/0?format=json`; writes happen only
+with `"commit": true`. KT calculates nutrition from the resolved ingredient
+items.
+
+```json
+{
+  "account": "personal",
+  "title": "Lasagne podle Mealie",
+  "servings": 4,
+  "preparation_time_minutes": 60,
+  "source": "mealie",
+  "source_id": "lasagne",
+  "ingredients": [
+    {"name": "mleté hovězí maso", "amount": 500, "unit": "g", "source": "mealie"},
+    {"name": "krájená rajčata", "amount": 400, "unit": "g", "source": "mealie"}
+  ],
+  "commit": true
+}
+```
+
+The response includes `recipe_guid`. Use that GUID with `record_recipe_serving`
+to log a portion of the created recipe. Preview responses return a compact
+`payload_summary`; set `include_payload=true` only for diagnostics when the full
+KT JSON body is needed.
 
 ### `record_recipe_serving(...)`
 

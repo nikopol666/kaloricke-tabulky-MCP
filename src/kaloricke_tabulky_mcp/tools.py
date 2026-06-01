@@ -12,7 +12,9 @@ from pydantic import ValidationError
 from .account_registry import AccountRegistry
 from .client import KalorickeTabulkyError
 from .models import (
+    CreateCustomRecipeRequest,
     DiarySummaryRequest,
+    ListCustomRecipesRequest,
     PrepareRecipeImportRequest,
     RecordFoodBatchRequest,
     RecordFoodRequest,
@@ -73,6 +75,25 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 request.query, kind=request.kind, page=request.page, limit=request.limit
             )
             return {"account": client.alias, "query": request.query, "results": results}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
+    async def list_custom_recipes(
+        account: str,
+        query: str = "",
+        page: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List private KT custom recipes/meals and their GUIDs."""
+        try:
+            request = ListCustomRecipesRequest(
+                account=account, query=query, page=page, limit=limit
+            )
+            client = registry.get_write_client(request.account)
+            return await client.list_custom_recipes(
+                query=request.query, page=request.page, limit=request.limit
+            )
         except (ValidationError, ValueError, KalorickeTabulkyError) as err:
             return _error(err)
 
@@ -229,10 +250,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         source_id: str | None = None,
         continue_on_error: bool = True,
     ) -> dict[str, Any]:
-        """Resolve recipe ingredients for a future KT custom recipe write.
-
-        This is preview-only until the private recipe create endpoint is verified.
-        """
+        """Resolve recipe ingredients for KT custom recipe creation preview."""
         try:
             request = PrepareRecipeImportRequest(
                 account=account,
@@ -285,13 +303,13 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             "account": client.alias,
             "title": request.title,
             "mode": "preview",
-            "write_supported": False,
+            "write_supported": True,
             "commit_required_for_write": True,
-            "recipe_endpoint_status": "not_verified",
+            "recipe_endpoint_status": "verified",
             "next_step": (
-                "Run probe_user_meal_endpoints(account) in the live authenticated "
-                "deployment, then capture the exact custom recipe create/save POST "
-                "URL and payload before enabling writes."
+                "Call create_custom_recipe with the same ingredients and commit=true "
+                "to create the private KT recipe, then use record_recipe_serving "
+                "with the returned recipe_guid."
             ),
             "servings": request.servings,
             "total_weight_g": request.total_weight_g,
@@ -301,6 +319,135 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             "failure_count": failure_count,
             "ingredients": results,
             "resolved_ingredients": resolved_ingredients,
+        }
+
+    @mcp.tool()
+    async def create_custom_recipe(
+        account: str,
+        title: str,
+        ingredients: list[dict[str, Any]],
+        servings: float | None = None,
+        preparation_time_minutes: int | None = None,
+        visibility: str = "private",
+        description: list[str] | None = None,
+        total_weight_g: float | None = None,
+        source: str | None = None,
+        source_id: str | None = None,
+        include_payload: bool = False,
+        commit: bool = False,
+        continue_on_error: bool = True,
+    ) -> dict[str, Any]:
+        """Preview or create a real KT custom recipe from resolved ingredients.
+
+        Writes only with commit=true. The returned recipe_guid can be used by
+        record_recipe_serving to log portions of the created recipe.
+        """
+        try:
+            request = CreateCustomRecipeRequest(
+                account=account,
+                title=title,
+                ingredients=ingredients,
+                servings=servings,
+                preparation_time_minutes=preparation_time_minutes,
+                visibility=visibility,  # type: ignore[arg-type]
+                description=description,
+                total_weight_g=total_weight_g,
+                source=source,
+                source_id=source_id,
+                include_payload=include_payload,
+                commit=commit,
+                continue_on_error=continue_on_error,
+            )
+            client = registry.get_write_client(request.account)
+        except (ValidationError, ValueError) as err:
+            return _error(err)
+
+        results: list[dict[str, Any]] = []
+        resolved_ingredients: list[dict[str, Any]] = []
+        success_count = 0
+        failure_count = 0
+        for index, ingredient in enumerate(request.ingredients):
+            try:
+                resolved = await client.resolve_food(
+                    query=ingredient.effective_query(),
+                    food_guid=ingredient.food_guid,
+                    kind=ingredient.kind,
+                    amount=ingredient.amount,
+                    unit=ingredient.unit,
+                    unit_guid=ingredient.unit_guid,
+                    target_date=date.today(),
+                )
+                preview = _recipe_ingredient_preview(index, ingredient, resolved)
+                results.append(preview)
+                resolved_ingredients.append(resolved)
+                success_count += 1
+            except KalorickeTabulkyError as err:
+                failure_count += 1
+                results.append(
+                    {
+                        "index": index,
+                        "status": "error",
+                        "source": ingredient.source,
+                        "source_id": ingredient.source_id,
+                        "error": str(err),
+                    }
+                )
+                if not request.continue_on_error:
+                    break
+
+        payload = None
+        if not failure_count:
+            try:
+                payload = client.build_custom_recipe_payload(
+                    title=request.title,
+                    resolved_ingredients=resolved_ingredients,
+                    servings=request.servings,
+                    preparation_time_minutes=request.preparation_time_minutes,
+                    visibility=request.visibility,
+                    description=request.description,
+                )
+            except KalorickeTabulkyError as err:
+                return _error(err)
+
+        preview = {
+            "account": client.alias,
+            "title": request.title,
+            "mode": "commit" if request.commit else "preview",
+            "commit_required_for_write": True,
+            "write_supported": True,
+            "recipe_endpoint": "/user/settings/meal/detail/edit/0?format=json",
+            "servings": request.servings,
+            "preparation_time_minutes": request.preparation_time_minutes,
+            "visibility": request.visibility,
+            "source": request.source,
+            "source_id": request.source_id,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "ingredients": results,
+            "payload_summary": _recipe_payload_summary(payload),
+        }
+        if request.include_payload:
+            preview["payload"] = payload
+        if not request.commit or failure_count:
+            return preview
+
+        try:
+            written = await client.create_custom_recipe(
+                title=request.title,
+                resolved_ingredients=resolved_ingredients,
+                servings=request.servings,
+                preparation_time_minutes=request.preparation_time_minutes,
+                visibility=request.visibility,
+                description=request.description,
+            )
+        except KalorickeTabulkyError as err:
+            return _error(err)
+        return {
+            **preview,
+            "status": "written",
+            "recipe_guid": written.get("recipe_guid"),
+            "written_record": written,
+            "next_step": "Use record_recipe_serving with recipe_guid to log a portion.",
         }
 
     @mcp.tool()
@@ -447,6 +594,30 @@ def _recipe_ingredient_preview(index: int, ingredient: Any, resolved: dict[str, 
             "search_result": resolved.get("search_result"),
             "payload": resolved.get("payload"),
         },
+    }
+
+
+def _recipe_payload_summary(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    return {
+        "title": payload.get("title"),
+        "guid": payload.get("guid"),
+        "portions": payload.get("portions"),
+        "preparationTime": payload.get("preparationTime"),
+        "visibility": payload.get("visibility"),
+        "ingredient_count": len(items),
+        "ingredients": [
+            {
+                "guid": item.get("guid"),
+                "title": item.get("title"),
+                "unitCount": item.get("unitCount"),
+                "selectedUnitGuid": item.get("selectedUnitGuid"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ],
     }
 
 

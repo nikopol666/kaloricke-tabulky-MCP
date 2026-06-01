@@ -24,6 +24,7 @@ class FakeClient:
 
     def __init__(self) -> None:
         self.write_calls = 0
+        self.recipe_write_calls = 0
 
     async def resolve_food(self, **kwargs):
         return {
@@ -35,12 +36,56 @@ class FakeClient:
             "unit_guid": "unit-1",
             "multiplier": kwargs.get("amount"),
             "search_result": {"food_guid": "guid-1"},
-            "payload": {"title": "Rýže"},
+            "payload": {
+                "title": "Rýže",
+                "energy": 1.2,
+                "energyUnit": "kcal",
+                "protein": 0.02,
+                "carbohydrate": 0.25,
+                "fat": 0.01,
+                "unitGuid": "unit-1",
+                "multiplier": kwargs.get("amount"),
+                "unitOptions": [{"id": "unit-1", "title": "1 g", "multiplier": 1}],
+            },
         }
 
     async def record_resolved_food(self, resolved):
         self.write_calls += 1
         return {"message": "ok", "food_guid": resolved["food_guid"]}
+
+    def build_custom_recipe_payload(self, **kwargs):
+        return {
+            "title": kwargs["title"],
+            "portions": str(int(kwargs["servings"] or 1)),
+            "items": [
+                {
+                    "guid": item["food_guid"],
+                    "title": item["title"],
+                    "unitCount": item["payload"]["multiplier"],
+                    "selectedUnitGuid": item["payload"]["unitGuid"],
+                }
+                for item in kwargs["resolved_ingredients"]
+            ],
+        }
+
+    async def create_custom_recipe(self, **kwargs):
+        self.recipe_write_calls += 1
+        return {
+            "message": "[recipe.save.success (cs)]",
+            "recipe_guid": "recipe-guid-1",
+            "title": kwargs["title"],
+            "ingredient_count": len(kwargs["resolved_ingredients"]),
+        }
+
+    async def list_custom_recipes(self, **kwargs):
+        return {
+            "account": self.alias,
+            "query": kwargs.get("query", ""),
+            "page": kwargs.get("page", 0),
+            "limit": kwargs.get("limit", 50),
+            "count": 1,
+            "recipes": [{"recipe_guid": "recipe-guid-1", "title": "TEST"}],
+        }
 
     async def probe_user_meal_endpoints(self):
         return {
@@ -111,6 +156,19 @@ async def test_record_food_with_commit_writes_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_custom_recipes_is_read_only() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["list_custom_recipes"](account="personal", query="TEST")
+
+    assert result["recipes"][0]["recipe_guid"] == "recipe-guid-1"
+    assert registry.client.write_calls == 0
+    assert registry.client.recipe_write_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_prepare_recipe_import_is_preview_only() -> None:
     mcp = FakeMCP()
     registry = FakeRegistry()
@@ -129,10 +187,68 @@ async def test_prepare_recipe_import_is_preview_only() -> None:
     )
 
     assert result["mode"] == "preview"
-    assert result["write_supported"] is False
-    assert result["recipe_endpoint_status"] == "not_verified"
+    assert result["write_supported"] is True
+    assert result["recipe_endpoint_status"] == "verified"
     assert result["success_count"] == 2
     assert registry.client.write_calls == 0
+    assert registry.client.recipe_write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_create_custom_recipe_without_commit_does_not_write() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["create_custom_recipe"](
+        account="personal",
+        title="Test recept",
+        ingredients=[{"name": "rýže", "amount": 100, "unit": "g"}],
+        servings=2,
+    )
+
+    assert result["mode"] == "preview"
+    assert result["write_supported"] is True
+    assert result["payload_summary"]["ingredients"][0]["selectedUnitGuid"] == "unit-1"
+    assert "payload" not in result
+    assert registry.client.recipe_write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_create_custom_recipe_can_include_diagnostic_payload() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["create_custom_recipe"](
+        account="personal",
+        title="Test recept",
+        ingredients=[{"name": "rýže", "amount": 100, "unit": "g"}],
+        servings=2,
+        include_payload=True,
+    )
+
+    assert result["payload"]["items"][0]["selectedUnitGuid"] == "unit-1"
+    assert registry.client.recipe_write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_create_custom_recipe_with_commit_writes_once() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+
+    result = await mcp.tools["create_custom_recipe"](
+        account="personal",
+        title="Test recept",
+        ingredients=[{"name": "rýže", "amount": 100, "unit": "g"}],
+        servings=2,
+        commit=True,
+    )
+
+    assert result["status"] == "written"
+    assert result["recipe_guid"] == "recipe-guid-1"
+    assert registry.client.recipe_write_calls == 1
 
 
 @pytest.mark.asyncio

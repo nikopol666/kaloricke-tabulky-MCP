@@ -24,6 +24,10 @@ FOOD_FORM_URL = (
     "https://www.kaloricketabulky.cz/user/foodstuff/add/form/{guid}/{date}/get?format=json"
 )
 RECORD_FOOD_URL = "https://www.kaloricketabulky.cz/user/foodstuff/add?format=json&="
+CUSTOM_RECIPE_EDIT_URL = (
+    "https://www.kaloricketabulky.cz/user/settings/meal/detail/edit/{guid}?format=json"
+)
+CUSTOM_RECIPE_LIST_URL = "https://www.kaloricketabulky.cz/user/settings/meal/list?{query}"
 BASE_URL = "https://www.kaloricketabulky.cz/"
 USER_MEAL_PROBE_URLS = (
     "https://www.kaloricketabulky.cz/user/recipe/add",
@@ -72,6 +76,72 @@ DETAIL_NUTRIENT_FIELDS: dict[str, tuple[str, str | None]] = {
     "sugar": ("Sugar", "g"),
     "salt": ("Salt", "g"),
 }
+
+RECIPE_ITEM_FIELDS = (
+    "guid",
+    "title",
+    "locked",
+    "preference",
+    "energy",
+    "energyUnit",
+    "protein",
+    "carbohydrate",
+    "fat",
+    "fiber",
+    "saturatedFattyAcid",
+    "transFattyAcid",
+    "monoSaturated",
+    "polySaturated",
+    "cholesterol",
+    "sugar",
+    "calcium",
+    "salt",
+    "sodium",
+    "water",
+    "phe",
+    "alcohol",
+    "unitCount",
+    "selectedUnitGuid",
+    "units",
+    "originalRecipeUnit",
+)
+
+DEFAULT_RECIPE_TAGS = (
+    ("040e84772e92487ab508c397c32b941a", "zdravé"),
+    ("0a3495ef6bac4f65b742dff48803ed84", "Keto dieta"),
+    ("105718ec5da34b71a6312209be5c2fa3", "vegan"),
+    ("113732e7e179433b8e4cafa1dee45c6b", "vegetarián"),
+    ("158729b9a6ed4463a3f017ea953f9401", "maso"),
+    ("16a4b05f58814ae7afeba108bcded87b", "snídaně"),
+    ("2330b6e297d3432395191eddd540c59d", "hlavní chod"),
+    ("2d21f10abd8c4ba88533168ebae3dadf", "večeře"),
+    ("39546a5808ca43a2a480a76e8d1e62f3", "chuťovky"),
+    ("42325edff55f4d24a655a01dc65f7e36", "oběd"),
+    ("48bdd5fd1d2840bfbb103c2cd0e5d824", "dietní"),
+    ("5bc898c56bbf470d84063f5cf709e437", "omáčky"),
+    ("670868921dda4ea5a10e8ff6953fb280", "svačina"),
+    ("684a4ce68baa4bcd8e504da30da41352", "RAW"),
+    ("7a8cfe8a64134615ad3358057c599dba", "moučníky"),
+    ("7e08e5e4cc804913bb05b0f7206be957", "mořské plody"),
+    ("844176bd09254dcfbab8190a80e842b4", "grilování"),
+    ("89338dd44196446ab754d1c38ff19baf", "saláty"),
+    ("8ac7130e6466492d868e94828dc3de88", "předkrmy"),
+    ("8e06d5f7ed704f1d843fadd68cb74d16", "ryby"),
+    ("924ef67dd4d84d55b09eb1fbb519e937", "Paleo dieta"),
+    ("92d0edcfeb6e40bb8bb81fdf20716426", "pečivo"),
+    ("9d22d8b6ab0a457c91dccbd7bd8120db", "drůbeží maso"),
+    ("a13f5b1e34d94ab485c5899a14d88369", "sladké"),
+    ("a52403c9153d400caf386d460e05970a", "nápoje"),
+    ("af346ac5048947acbc1281606bef654b", "těstoviny"),
+    ("b85d9bab7f364951b50bf4affa87ef97", "bez cukru"),
+    ("c9aa194c882b43b5a2e1f33d8f4d7020", "Rychle"),
+    ("c9daf94b3edd406396ebc82bba6c6a14", "přílohy"),
+    ("d08a0595823a4942983b0936319e5824", "bez laktózy"),
+    ("d139a9ec6a6748d982cdb2ad2a01c7d9", "cukroví"),
+    ("ef581e5de5f3417c82449a6d29106be4", "pomazánky"),
+    ("f3f2caa46dc849f3beb89af9c137b6df", "Bezlepkový"),
+    ("f791583164244dc7803f011fabd36f95", "polévky"),
+)
 
 KNOWN_METRICS: dict[str, tuple[str, str | None]] = {
     "energy": ("Energy", "kcal"),
@@ -390,6 +460,102 @@ class KalorickeTabulkyClient:
             "search_result": resolved.get("search_result"),
         }
 
+    def build_custom_recipe_payload(
+        self,
+        *,
+        title: str,
+        resolved_ingredients: list[dict[str, Any]],
+        servings: float | None,
+        preparation_time_minutes: int | None = None,
+        visibility: str = "private",
+        description: list[str] | None = None,
+        recipe_guid: str = "0",
+    ) -> dict[str, Any]:
+        items = [_recipe_item_from_resolved(resolved) for resolved in resolved_ingredients]
+        return {
+            "guid": recipe_guid,
+            "title": title,
+            "url": None,
+            "link": None,
+            "description": description or [],
+            "descriptionOptional": None,
+            "portions": _recipe_portions(servings),
+            "preparationTime": preparation_time_minutes,
+            "requiresPrePreparation": None,
+            "visibility": visibility,
+            "lang": "cs",
+            "items": items,
+            "files": None,
+            "tags": _default_recipe_tags(),
+            "units": [],
+            "similarByTitles": None,
+            "user": None,
+            "userInfo": None,
+            "rating": None,
+            "ratingCount": None,
+            "ratingAdmin": None,
+            "hasUnits": False,
+            "notifyConfirm": True,
+            "locked": None,
+            "guidRecipePartner": None,
+        }
+
+    async def create_custom_recipe(
+        self,
+        *,
+        title: str,
+        resolved_ingredients: list[dict[str, Any]],
+        servings: float | None,
+        preparation_time_minutes: int | None = None,
+        visibility: str = "private",
+        description: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.build_custom_recipe_payload(
+            title=title,
+            resolved_ingredients=resolved_ingredients,
+            servings=servings,
+            preparation_time_minutes=preparation_time_minutes,
+            visibility=visibility,
+            description=description,
+        )
+        response = await self._request_with_reauth(
+            "POST",
+            CUSTOM_RECIPE_EDIT_URL.format(guid="0"),
+            json=payload,
+            headers={"Accept": "application/json, text/plain, */*"},
+        )
+        return {
+            "message": response.get("message"),
+            "recipe_guid": response.get("data"),
+            "title": title,
+            "servings": servings,
+            "ingredient_count": len(resolved_ingredients),
+            "endpoint": "/user/settings/meal/detail/edit/0?format=json",
+        }
+
+    async def list_custom_recipes(
+        self, *, query: str = "", page: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        query_string = urlencode(
+            {"format": "json", "page": page, "limit": limit, "query": query}
+        )
+        body = await self._request_with_reauth(
+            "GET",
+            CUSTOM_RECIPE_LIST_URL.format(query=query_string),
+            headers={"Accept": "application/json, text/plain, */*"},
+        )
+        data = body.get("data") or []
+        if not isinstance(data, list):
+            raise KalorickeTabulkyError(f"Unexpected custom recipe list response: {body}")
+        return {
+            "account": self.alias,
+            "query": query,
+            "page": page,
+            "limit": limit,
+            "count": body.get("count", len(data)),
+            "recipes": [_normalize_custom_recipe(item) for item in data if isinstance(item, dict)],
+        }
+
     async def probe_user_meal_endpoints(self) -> dict[str, Any]:
         """Read authenticated custom meal/recipe pages to discover private form endpoints."""
         probes = []
@@ -481,6 +647,7 @@ class KalorickeTabulkyClient:
     async def _request_text(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = dict(kwargs.pop("headers", {}))
         headers["Cookie"] = self._cookies or ""
+        headers.setdefault("Accept-Encoding", "identity")
         response = await self._session.request(
             method, url, headers=headers, allow_redirects=False, **kwargs
         )
@@ -810,6 +977,19 @@ def _normalize_search_result(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_custom_recipe(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recipe_guid": item.get("guid"),
+        "title": item.get("title"),
+        "energy": _parse_localized_number(item.get("energy")),
+        "energy_unit": item.get("energyUnit"),
+        "visibility": item.get("visibility"),
+        "portions": _parse_localized_number(item.get("portions")),
+        "url": item.get("url"),
+        "in_use": item.get("inUse"),
+    }
+
+
 def _meal_type_id(value: str | None) -> str | None:
     if not value:
         return None
@@ -873,6 +1053,95 @@ def _apply_unit_selection(
         payload["multiplier"] = amount
     else:
         payload["multiplier"] = amount
+
+
+def _recipe_item_from_resolved(resolved: dict[str, Any]) -> dict[str, Any]:
+    payload = resolved.get("payload")
+    if not isinstance(payload, dict):
+        raise KalorickeTabulkyError("Resolved ingredient is missing KT payload")
+
+    food_guid = resolved.get("food_guid") or payload.get("guid")
+    if not food_guid:
+        raise KalorickeTabulkyError("Resolved ingredient is missing food_guid")
+
+    item = {
+        "guid": str(food_guid),
+        "title": payload.get("title") or resolved.get("title"),
+        "locked": True,
+        "preference": payload.get("preference"),
+        "energy": payload.get("energy"),
+        "energyUnit": payload.get("energyUnit") or payload.get("energy_unit") or "kcal",
+        "protein": payload.get("protein"),
+        "carbohydrate": payload.get("carbohydrate"),
+        "fat": payload.get("fat"),
+        "fiber": payload.get("fiber"),
+        "saturatedFattyAcid": payload.get("saturatedFattyAcid"),
+        "transFattyAcid": payload.get("transFattyAcid"),
+        "monoSaturated": payload.get("monoSaturated"),
+        "polySaturated": payload.get("polySaturated"),
+        "cholesterol": payload.get("cholesterol"),
+        "sugar": payload.get("sugar"),
+        "calcium": payload.get("calcium"),
+        "salt": payload.get("salt"),
+        "sodium": payload.get("sodium"),
+        "water": payload.get("water"),
+        "phe": payload.get("phe"),
+        "alcohol": payload.get("alcohol"),
+        "unitCount": payload.get("multiplier"),
+        "selectedUnitGuid": payload.get("unitGuid"),
+        "units": _recipe_units(payload),
+        "originalRecipeUnit": payload.get("originalRecipeUnit"),
+    }
+    if not item["title"]:
+        raise KalorickeTabulkyError(f"Resolved ingredient {food_guid} is missing title")
+    if item["unitCount"] is None:
+        raise KalorickeTabulkyError(f"Resolved ingredient {item['title']} is missing amount")
+    if not item["selectedUnitGuid"]:
+        raise KalorickeTabulkyError(f"Resolved ingredient {item['title']} is missing unitGuid")
+    return {key: item.get(key) for key in RECIPE_ITEM_FIELDS}
+
+
+def _recipe_units(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    units = payload.get("units")
+    if not isinstance(units, list):
+        units = payload.get("unitOptions")
+    result = []
+    for unit in units if isinstance(units, list) else []:
+        if not isinstance(unit, dict) or not unit.get("id"):
+            continue
+        result.append(
+            {
+                "id": unit.get("id"),
+                "title": unit.get("title"),
+                "multiplier": unit.get("multiplier"),
+            }
+        )
+    return result
+
+
+def _default_recipe_tags() -> list[dict[str, Any]]:
+    return [
+        {
+            "guid": guid,
+            "guidTag": guid,
+            "guidRecipe": guid,
+            "title": title,
+            "type": None,
+            "value": None,
+            "unit": None,
+            "selected": False,
+        }
+        for guid, title in DEFAULT_RECIPE_TAGS
+    ]
+
+
+def _recipe_portions(servings: float | None) -> str:
+    if servings is None:
+        return "1"
+    numeric = float(servings)
+    if numeric.is_integer():
+        return str(int(numeric))
+    return str(numeric)
 
 
 def _validate_amount(amount: float) -> None:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from kaloricke_tabulky_mcp.client import (
+    _default_recipe_tags,
+    _normalize_custom_recipe,
+    _recipe_item_from_resolved,
+    _recipe_portions,
     _extract_candidate_endpoints,
     _extract_probe_forms,
     _extract_probe_scripts,
@@ -32,6 +36,30 @@ def test_normalize_search_result() -> None:
     assert result["food_guid"] == "abc"
     assert result["energy"] == 123.5
     assert result["brand_name"] == "Brand"
+
+
+def test_normalize_custom_recipe() -> None:
+    result = _normalize_custom_recipe(
+        {
+            "guid": "recipe-guid",
+            "title": "TEST",
+            "energy": "216",
+            "energyUnit": "kcal",
+            "visibility": "private",
+            "portions": 4.0,
+        }
+    )
+
+    assert result == {
+        "recipe_guid": "recipe-guid",
+        "title": "TEST",
+        "energy": 216.0,
+        "energy_unit": "kcal",
+        "visibility": "private",
+        "portions": 4.0,
+        "url": None,
+        "in_use": None,
+    }
 
 
 def test_extract_candidate_endpoints() -> None:
@@ -78,3 +106,49 @@ def test_safe_probe_snippet_masks_email() -> None:
 
     assert "test@example.com" not in snippet
     assert "t***@example.com" in snippet
+
+
+def test_recipe_item_from_resolved_uses_diary_payload_shape() -> None:
+    item = _recipe_item_from_resolved(
+        {
+            "food_guid": "food-guid-1",
+            "title": "kuřecí prsa",
+            "payload": {
+                "title": "kuřecí prsa",
+                "energy": 1.056,
+                "energyUnit": "kcal",
+                "protein": 0.231,
+                "carbohydrate": 0,
+                "fat": 0.015,
+                "unitGuid": "0000000000000001",
+                "multiplier": 162,
+                "unitOptions": [
+                    {"id": "120g", "title": "120 g", "multiplier": 120},
+                    {"id": "0000000000000001", "title": "1 g", "multiplier": 1},
+                ],
+            },
+        }
+    )
+
+    assert item["guid"] == "food-guid-1"
+    assert item["locked"] is True
+    assert item["unitCount"] == 162
+    assert item["selectedUnitGuid"] == "0000000000000001"
+    assert item["units"] == [
+        {"id": "120g", "title": "120 g", "multiplier": 120},
+        {"id": "0000000000000001", "title": "1 g", "multiplier": 1},
+    ]
+
+
+def test_recipe_portions_are_sent_as_string() -> None:
+    assert _recipe_portions(None) == "1"
+    assert _recipe_portions(4) == "4"
+    assert _recipe_portions(2.5) == "2.5"
+
+
+def test_default_recipe_tags_match_web_payload_shape() -> None:
+    tags = _default_recipe_tags()
+
+    assert tags
+    assert tags[0]["guid"] == tags[0]["guidTag"] == tags[0]["guidRecipe"]
+    assert tags[0]["selected"] is False

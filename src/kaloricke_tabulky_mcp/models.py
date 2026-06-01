@@ -56,6 +56,13 @@ class SearchFoodRequest(StrictModel):
     limit: int = Field(default=10, ge=1, le=50)
 
 
+class ListCustomRecipesRequest(StrictModel):
+    account: str = Field(min_length=1)
+    query: str = ""
+    page: int = Field(default=0, ge=0)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
 class RecordFoodRequest(StrictModel):
     account: str = Field(min_length=1)
     date: Date = Field(default_factory=Date.today)
@@ -186,6 +193,14 @@ class PrepareRecipeImportRequest(StrictModel):
                 if isinstance(item, dict) and "account" in item:
                     raise ValueError("Recipe ingredients must not override account")
         return data
+
+
+class CreateCustomRecipeRequest(PrepareRecipeImportRequest):
+    preparation_time_minutes: int | None = Field(default=None, ge=0, le=1440)
+    visibility: Literal["private", "public"] = "private"
+    description: list[str] | None = None
+    include_payload: bool = False
+    commit: bool = False
 
 
 class RecordRecipeServingRequest(StrictModel):
