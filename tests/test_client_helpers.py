@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kaloricke_tabulky_mcp.client import (
     _default_recipe_tags,
+    _apply_unit_selection,
     _normalize_custom_recipe,
     _recipe_item_from_resolved,
     _recipe_portions,
@@ -152,3 +153,11 @@ def test_default_recipe_tags_match_web_payload_shape() -> None:
     assert tags
     assert tags[0]["guid"] == tags[0]["guidTag"] == tags[0]["guidRecipe"]
     assert tags[0]["selected"] is False
+
+
+def test_apply_unit_selection_tolerates_null_unit_options() -> None:
+    payload = {"unitOptions": None}
+
+    _apply_unit_selection(payload, amount=1, unit="porce", unit_guid=None)
+
+    assert payload["multiplier"] == 1

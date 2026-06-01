@@ -436,7 +436,7 @@ class KalorickeTabulkyClient:
         _apply_unit_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
         return {
             "food_guid": food_guid,
-            "title": payload.get("title"),
+            "title": payload.get("title") or (search_result or {}).get("title"),
             "date": payload.get("date"),
             "time": payload.get("time"),
             "meal_type": payload.get("diaryTimeGuid"),
@@ -1038,9 +1038,10 @@ def _apply_unit_selection(
     if amount is None:
         return
     _validate_amount(amount)
+    raw_options = payload.get("unitOptions") or []
     options = [
         option
-        for option in payload.get("unitOptions", [])
+        for option in raw_options
         if isinstance(option, dict) and option.get("id")
     ]
     selected = _find_unit_option(options, amount, unit)
