@@ -24,6 +24,8 @@ FOOD_FORM_URL = (
     "https://www.kaloricketabulky.cz/user/foodstuff/add/form/{guid}/{date}/get?format=json"
 )
 RECORD_FOOD_URL = "https://www.kaloricketabulky.cz/user/foodstuff/add?format=json&="
+RECIPE_FORM_URL = "https://www.kaloricketabulky.cz/user/meal/add/form/{guid}?format=json"
+RECORD_RECIPE_URL = "https://www.kaloricketabulky.cz/user/recipe/add?format=json"
 CUSTOM_RECIPE_EDIT_URL = (
     "https://www.kaloricketabulky.cz/user/settings/meal/detail/edit/{guid}?format=json"
 )
@@ -448,6 +450,73 @@ class KalorickeTabulkyClient:
 
     async def record_resolved_food(self, resolved: dict[str, Any]) -> dict[str, Any]:
         response = await self._request_with_reauth("POST", RECORD_FOOD_URL, json=resolved["payload"])
+        return {
+            "message": response.get("message"),
+            "food_guid": resolved.get("food_guid"),
+            "title": resolved.get("title"),
+            "date": resolved.get("date"),
+            "time": resolved.get("time"),
+            "meal_type": resolved.get("meal_type"),
+            "unit_guid": resolved.get("unit_guid"),
+            "multiplier": resolved.get("multiplier"),
+            "search_result": resolved.get("search_result"),
+        }
+
+    async def resolve_recipe_serving(
+        self,
+        *,
+        query: str | None = None,
+        recipe_guid: str | None = None,
+        amount: float | None = None,
+        unit: str | None = None,
+        unit_guid: str | None = None,
+        target_date: date,
+        target_time: str | None = None,
+        meal_type: str | None = None,
+    ) -> dict[str, Any]:
+        recipe_lookup: dict[str, Any] | None = None
+        if recipe_guid is None:
+            if not query:
+                raise KalorickeTabulkyError("Set query or recipe_guid")
+            recipes = await self.list_custom_recipes(query=query, limit=10)
+            recipe_lookup = next(iter(recipes.get("recipes", [])), None)
+            if not recipe_lookup:
+                raise KalorickeTabulkyError(f"No custom recipe found for query: {query}")
+            recipe_guid = str(recipe_lookup["recipe_guid"])
+
+        form_body = await self._request_with_reauth(
+            "GET", RECIPE_FORM_URL.format(guid=recipe_guid)
+        )
+        form = form_body.get("data")
+        if not isinstance(form, dict):
+            raise KalorickeTabulkyError(f"Unexpected recipe add form response: {form_body}")
+
+        payload = dict(form)
+        payload["date"] = self._format_date(target_date)
+        if target_time is not None:
+            payload["timeUser"] = True
+            payload["time"] = target_time
+        payload["diaryTimeGuid"] = _meal_type_id(meal_type) or _meal_type_from_time(target_time)
+        _apply_recipe_serving_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
+        return {
+            "food_guid": recipe_guid,
+            "title": payload.get("title") or (recipe_lookup or {}).get("title"),
+            "date": payload.get("date"),
+            "time": payload.get("time"),
+            "meal_type": payload.get("diaryTimeGuid"),
+            "unit_guid": payload.get("selectedUnitGuid"),
+            "multiplier": payload.get("selectedUnitMultiplier"),
+            "payload": payload,
+            "search_result": recipe_lookup,
+        }
+
+    async def record_resolved_recipe(self, resolved: dict[str, Any]) -> dict[str, Any]:
+        response = await self._request_with_reauth(
+            "POST",
+            RECORD_RECIPE_URL,
+            json=resolved["payload"],
+            headers={"Accept": "application/json, text/plain, */*"},
+        )
         return {
             "message": response.get("message"),
             "food_guid": resolved.get("food_guid"),
@@ -1056,6 +1125,102 @@ def _apply_unit_selection(
         payload["multiplier"] = amount
     else:
         payload["multiplier"] = amount
+
+
+def _apply_recipe_serving_selection(
+    payload: dict[str, Any],
+    *,
+    amount: float | None,
+    unit: str | None,
+    unit_guid: str | None,
+) -> None:
+    if unit_guid:
+        payload["selectedUnitGuid"] = unit_guid
+        if amount is not None:
+            _validate_amount(amount)
+            payload["selectedUnitMultiplier"] = amount
+        return
+    if amount is None:
+        return
+    _validate_amount(amount)
+    options = [
+        option
+        for option in (payload.get("units") or [])
+        if isinstance(option, dict) and option.get("id")
+    ]
+    selected = _find_unit_option(options, amount, unit)
+    if selected is not None:
+        payload["selectedUnitGuid"] = selected["id"]
+    payload["selectedUnitMultiplier"] = amount
+    _scale_recipe_foodstuff_counts(payload, amount=amount)
+
+
+def _scale_recipe_foodstuff_counts(payload: dict[str, Any], *, amount: float) -> None:
+    units = payload.get("units") or []
+    selected_unit = next(
+        (
+            unit
+            for unit in units
+            if isinstance(unit, dict) and unit.get("id") == payload.get("selectedUnitGuid")
+        ),
+        None,
+    )
+    foodstuff = payload.get("foodstuff")
+    if not isinstance(selected_unit, dict) or not isinstance(foodstuff, list):
+        return
+    unit_multiplier = _parse_localized_number(selected_unit.get("multiplier"))
+    if unit_multiplier == -2:
+        portions_max = _parse_localized_number(payload.get("portionsMax"))
+        if not portions_max:
+            return
+        factor = amount / portions_max
+    elif unit_multiplier == -1:
+        factor = amount / 100
+    elif unit_multiplier is not None and unit_multiplier > 0:
+        total_weight = sum(
+            _foodstuff_weight(item)
+            for item in foodstuff
+            if isinstance(item, dict) and item.get("selected", True)
+        )
+        if not total_weight:
+            return
+        factor = (amount * unit_multiplier) / total_weight
+    else:
+        return
+    for item in foodstuff:
+        if not isinstance(item, dict):
+            continue
+        if not item.get("selected", True):
+            item["count"] = 0
+            continue
+        count = _parse_localized_number(item.get("countOriginal"))
+        if count is None:
+            count = _parse_localized_number(item.get("count"))
+        if count is not None:
+            item["count"] = count * factor
+
+
+def _foodstuff_weight(item: dict[str, Any]) -> float:
+    count = _parse_localized_number(item.get("countOriginal"))
+    if count is None:
+        count = _parse_localized_number(item.get("count")) or 0
+    units = item.get("units") or []
+    selected_unit = next(
+        (
+            unit
+            for unit in units
+            if isinstance(unit, dict) and unit.get("id") == item.get("selectedUnitGuid")
+        ),
+        None,
+    )
+    multiplier = (
+        _parse_localized_number(selected_unit.get("multiplier"))
+        if isinstance(selected_unit, dict)
+        else None
+    )
+    if multiplier is None:
+        multiplier = 1
+    return count * multiplier
 
 
 def _recipe_item_from_resolved(resolved: dict[str, Any]) -> dict[str, Any]:

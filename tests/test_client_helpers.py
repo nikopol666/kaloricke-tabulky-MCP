@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from kaloricke_tabulky_mcp.client import (
     _default_recipe_tags,
+    _apply_recipe_serving_selection,
     _apply_unit_selection,
     _normalize_custom_recipe,
     _recipe_item_from_resolved,
@@ -161,3 +162,33 @@ def test_apply_unit_selection_tolerates_null_unit_options() -> None:
     _apply_unit_selection(payload, amount=1, unit="porce", unit_guid=None)
 
     assert payload["multiplier"] == 1
+
+
+def test_apply_recipe_serving_selection_scales_portions() -> None:
+    payload = {
+        "selectedUnitGuid": "portion",
+        "selectedUnitMultiplier": 1,
+        "portionsMax": 4,
+        "units": [{"id": "portion", "title": "porce", "multiplier": -2}],
+        "foodstuff": [
+            {
+                "selected": True,
+                "count": 100,
+                "selectedUnitGuid": "g",
+                "units": [{"id": "g", "title": "1 g", "multiplier": 1}],
+            },
+            {
+                "selected": True,
+                "count": 20,
+                "selectedUnitGuid": "g",
+                "units": [{"id": "g", "title": "1 g", "multiplier": 1}],
+            },
+        ],
+    }
+
+    _apply_recipe_serving_selection(payload, amount=1, unit="porce", unit_guid=None)
+
+    assert payload["selectedUnitGuid"] == "portion"
+    assert payload["selectedUnitMultiplier"] == 1
+    assert payload["foodstuff"][0]["count"] == 25
+    assert payload["foodstuff"][1]["count"] == 5

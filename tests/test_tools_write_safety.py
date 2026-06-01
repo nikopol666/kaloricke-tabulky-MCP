@@ -53,6 +53,27 @@ class FakeClient:
         self.write_calls += 1
         return {"message": "ok", "food_guid": resolved["food_guid"]}
 
+    async def resolve_recipe_serving(self, **kwargs):
+        return {
+            "food_guid": kwargs.get("recipe_guid") or "recipe-guid-1",
+            "title": "Lasagne podle Mealie",
+            "date": "01.06.2026",
+            "time": kwargs.get("target_time"),
+            "meal_type": "5",
+            "unit_guid": "portion-unit",
+            "multiplier": kwargs.get("amount"),
+            "search_result": {"recipe_guid": "recipe-guid-1"},
+            "payload": {
+                "title": "Lasagne podle Mealie",
+                "selectedUnitGuid": "portion-unit",
+                "selectedUnitMultiplier": kwargs.get("amount"),
+            },
+        }
+
+    async def record_resolved_recipe(self, resolved):
+        self.write_calls += 1
+        return {"message": "ok", "food_guid": resolved["food_guid"]}
+
     def build_custom_recipe_payload(self, **kwargs):
         return {
             "title": kwargs["title"],

@@ -484,10 +484,9 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 commit=commit,
             )
             client = registry.get_write_client(request.account)
-            resolved = await client.resolve_food(
+            resolved = await client.resolve_recipe_serving(
                 query=request.query,
-                food_guid=request.recipe_guid or request.food_guid,
-                kind="food",
+                recipe_guid=request.recipe_guid or request.food_guid,
                 amount=request.amount,
                 unit=request.unit,
                 unit_guid=request.unit_guid,
@@ -498,7 +497,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             preview = _preview(client.alias, resolved, request.commit)
             if not request.commit:
                 return preview
-            written = await client.record_resolved_food(resolved)
+            written = await client.record_resolved_recipe(resolved)
             return {**preview, "status": "written", "written_record": written}
         except (ValidationError, ValueError, KalorickeTabulkyError) as err:
             return _error(err)
