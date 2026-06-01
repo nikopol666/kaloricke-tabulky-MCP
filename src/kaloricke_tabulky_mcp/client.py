@@ -539,11 +539,13 @@ class KalorickeTabulkyClient:
         query_string = urlencode(
             {"format": "json", "page": page, "limit": limit, "query": query}
         )
-        body = await self._request_with_reauth(
+        body = await self._request_any_with_reauth(
             "GET",
             CUSTOM_RECIPE_LIST_URL.format(query=query_string),
             headers={"Accept": "application/json, text/plain, */*"},
         )
+        if not isinstance(body, dict):
+            raise KalorickeTabulkyError(f"Unexpected custom recipe list response: {body}")
         data = body.get("data") or []
         if not isinstance(data, list):
             raise KalorickeTabulkyError(f"Unexpected custom recipe list response: {body}")
