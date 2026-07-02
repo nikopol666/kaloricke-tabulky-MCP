@@ -99,14 +99,18 @@ def _parse_accounts(source: dict[str, str] | os._Environ[str], raw_aliases: str)
         normalized_seen[env_suffix] = alias
         email = _clean_required_secret(source.get(f"KT_ACCOUNT_{env_suffix}_EMAIL"))
         password = _clean_required_password(source.get(f"KT_ACCOUNT_{env_suffix}_PASSWORD"))
-        if not email or not password:
+        password_md5 = _clean_optional_password_md5(
+            source.get(f"KT_ACCOUNT_{env_suffix}_PASSWORD_MD5")
+        )
+        if not email or (not password and not password_md5):
             raise ConfigError(
-                f"Missing KT_ACCOUNT_{env_suffix}_EMAIL or KT_ACCOUNT_{env_suffix}_PASSWORD"
+                f"Missing KT_ACCOUNT_{env_suffix}_EMAIL and password credential"
             )
         accounts[normalized] = AccountCredentials(
             alias=normalized,
             email=email,
-            password=password,
+            password=password or "",
+            password_md5=password_md5,
         )
     return accounts
 
@@ -142,3 +146,14 @@ def _clean_required_password(value: str | None) -> str | None:
     if value is None:
         return None
     return value if value.strip() else None
+
+
+def _clean_optional_password_md5(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip().lower()
+    if not stripped:
+        return None
+    if not re.fullmatch(r"[a-f0-9]{32}", stripped):
+        raise ConfigError("KT_ACCOUNT_*_PASSWORD_MD5 must be a 32-character hex MD5 hash")
+    return stripped

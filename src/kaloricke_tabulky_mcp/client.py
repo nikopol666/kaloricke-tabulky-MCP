@@ -229,10 +229,16 @@ class AccountCredentials:
 
     alias: str
     email: str
-    password: str
+    password: str = ""
+    password_md5: str | None = None
 
     def safe_dict(self) -> dict[str, str]:
         return {"alias": self.alias, "email": _mask_email(self.email)}
+
+    def login_password_hash(self) -> str:
+        if self.password_md5:
+            return self.password_md5
+        return md5(self.password.encode(), usedforsecurity=False).hexdigest()
 
 
 @dataclass(slots=True, frozen=True)
@@ -317,9 +323,7 @@ class KalorickeTabulkyClient:
                 login_url,
                 json={
                     "email": self._credentials.email,
-                    "password": md5(
-                        self._credentials.password.encode(), usedforsecurity=False
-                    ).hexdigest(),
+                    "password": self._credentials.login_password_hash(),
                 },
                 headers=_login_headers(),
             )
@@ -1546,6 +1550,7 @@ def _auth_failure_message(
         f"email={_mask_email(credentials.email)}, "
         f"email_len={len(credentials.email)}, "
         f"password_len={len(credentials.password)}, "
+        f"password_md5_configured={bool(credentials.password_md5)}, "
         f"attempts={attempts}"
     )
 

@@ -37,14 +37,18 @@ ghcr.io/nikopol666/kaloricke-tabulky-mcp:latest
 KT_ACCOUNTS=personal,partner
 KT_ACCOUNT_PERSONAL_EMAIL=user@example.com
 KT_ACCOUNT_PERSONAL_PASSWORD=replace-me
+# Optional alternative when plaintext contains characters that are hard to pass through Compose/Portainer:
+# KT_ACCOUNT_PERSONAL_PASSWORD_MD5=32-character-browser-md5
 KT_ACCOUNT_PARTNER_EMAIL=partner@example.com
 KT_ACCOUNT_PARTNER_PASSWORD=replace-me
+# KT_ACCOUNT_PARTNER_PASSWORD_MD5=32-character-browser-md5
 KT_DEFAULT_ACCOUNT=personal
 MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
 
 Aliases are normalized to lowercase underscores. Collisions such as `my-account` and `my_account` are rejected.
+`KT_ACCOUNT_<ALIAS>_PASSWORD_MD5` is optional and takes precedence over plaintext password when set. Treat it as password-equivalent secret material.
 When `MCP_BEARER_TOKEN` is set, MCP clients must send `Authorization: Bearer <token>` to `/mcp`. `/health` stays unauthenticated for container healthchecks.
 
 ## Tools

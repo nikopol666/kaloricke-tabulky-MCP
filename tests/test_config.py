@@ -37,6 +37,32 @@ def test_strips_account_email_but_preserves_password() -> None:
     assert settings.accounts["personal"].password == " secret "
 
 
+def test_loads_account_with_password_md5_without_plain_password() -> None:
+    settings = load_settings(
+        {
+            "KT_ACCOUNTS": "personal",
+            "KT_ACCOUNT_PERSONAL_EMAIL": "user@example.com",
+            "KT_ACCOUNT_PERSONAL_PASSWORD_MD5": " 0123456789ABCDEF0123456789ABCDEF ",
+        }
+    )
+
+    account = settings.accounts["personal"]
+    assert account.password == ""
+    assert account.password_md5 == "0123456789abcdef0123456789abcdef"
+    assert account.login_password_hash() == "0123456789abcdef0123456789abcdef"
+
+
+def test_rejects_invalid_password_md5() -> None:
+    with pytest.raises(ConfigError, match="PASSWORD_MD5"):
+        load_settings(
+            {
+                "KT_ACCOUNTS": "personal",
+                "KT_ACCOUNT_PERSONAL_EMAIL": "user@example.com",
+                "KT_ACCOUNT_PERSONAL_PASSWORD_MD5": "not-a-md5",
+            }
+        )
+
+
 def test_rejects_alias_collision() -> None:
     with pytest.raises(ConfigError, match="collide"):
         load_settings(
