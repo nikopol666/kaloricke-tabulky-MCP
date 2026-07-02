@@ -8,6 +8,7 @@ from kaloricke_tabulky_mcp.client import (
     _recipe_item_from_resolved,
     _recipe_portions,
     _extract_candidate_endpoints,
+    _extract_login_action,
     _extract_probe_forms,
     _extract_probe_scripts,
     _meal_type_from_time,
@@ -95,6 +96,15 @@ def test_extract_probe_forms_returns_metadata_without_values() -> None:
             "input_names": ["csrf", "title"],
         }
     ]
+
+
+def test_extract_login_action_from_hidden_input() -> None:
+    assert (
+        _extract_login_action(
+            '<input type="hidden" id="loginUrl" action="/login/create?=&format=json"/>'
+        )
+        == "/login/create?=&format=json"
+    )
 
 
 def test_extract_probe_scripts_normalizes_local_urls() -> None:
