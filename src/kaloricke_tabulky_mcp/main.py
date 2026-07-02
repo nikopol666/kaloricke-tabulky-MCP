@@ -48,6 +48,7 @@ def create_app() -> FastMCP:
         host=settings.mcp_host,
         port=settings.mcp_port,
         json_response=True,
+        stateless_http=True,
         lifespan=lifespan,
     )
     setup_tools(mcp, registry)
