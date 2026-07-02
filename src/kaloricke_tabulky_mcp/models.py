@@ -204,6 +204,49 @@ class CreateCustomRecipeRequest(PrepareRecipeImportRequest):
     commit: bool = False
 
 
+class UploadCustomRecipeImageRequest(StrictModel):
+    account: str = Field(min_length=1)
+    recipe_guid: str = Field(min_length=1)
+    image_base64: str = Field(min_length=1)
+    filename: str = Field(default="recipe-image.jpg", min_length=1, max_length=200)
+    content_type: str = Field(default="image/jpeg", min_length=1, max_length=100)
+    field_name: str = Field(default="file", min_length=1, max_length=80)
+    commit: bool = False
+
+    @field_validator("recipe_guid")
+    @classmethod
+    def _recipe_guid(cls, value: str) -> str:
+        text = value.strip()
+        if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", text):
+            raise ValueError("recipe_guid must be a KT recipe GUID")
+        return text
+
+    @field_validator("filename")
+    @classmethod
+    def _filename(cls, value: str) -> str:
+        text = value.strip().replace("\\", "/").split("/")[-1]
+        if not text:
+            raise ValueError("filename is required")
+        return text
+
+    @field_validator("content_type")
+    @classmethod
+    def _content_type(cls, value: str) -> str:
+        text = value.strip().lower()
+        allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
+        if text not in allowed:
+            raise ValueError(f"content_type must be one of {sorted(allowed)}")
+        return "image/jpeg" if text == "image/jpg" else text
+
+    @field_validator("field_name")
+    @classmethod
+    def _field_name(cls, value: str) -> str:
+        text = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+            raise ValueError("field_name must be a simple form field name")
+        return text
+
+
 class RecordRecipeServingRequest(StrictModel):
     account: str = Field(min_length=1)
     date: Date = Field(default_factory=Date.today)

@@ -176,6 +176,28 @@ to log a portion of the created recipe. Preview responses return a compact
 `payload_summary`; set `include_payload=true` only for diagnostics when the full
 KT JSON body is needed.
 
+### `upload_custom_recipe_image(...)`
+
+Previews or uploads an image to an existing Kaloricke Tabulky custom recipe
+through `/user/settings/meal/detail/{recipe_guid}/image/create?format=json`.
+Writes happen only with `"commit": true`. Pass the image as raw base64 or a
+`data:image/...;base64,...` URL; the server uses the authenticated KT session,
+not browser cookies from DevTools captures.
+
+```json
+{
+  "account": "personal",
+  "recipe_guid": "created-kt-custom-recipe-guid",
+  "image_base64": "data:image/jpeg;base64,...",
+  "filename": "lasagne.jpg",
+  "content_type": "image/jpeg",
+  "commit": true
+}
+```
+
+The observed KT multipart field name is handled as `file` by default. Override
+`field_name` only if a future browser capture shows a different form field.
+
 ### `record_recipe_serving(...)`
 
 Previews or records a serving of a Kaloricke Tabulky custom recipe after the

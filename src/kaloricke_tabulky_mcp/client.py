@@ -12,7 +12,7 @@ import re
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
-from aiohttp import ClientResponse, ClientSession, ClientTimeout
+from aiohttp import ClientResponse, ClientSession, ClientTimeout, FormData
 
 LOGIN_URL = "https://www.kaloricketabulky.cz/login/create?format=json"
 SUMMARY_URL = "https://www.kaloricketabulky.cz/statistic/summary/{date}/get?format=json"
@@ -28,6 +28,9 @@ RECIPE_FORM_URL = "https://www.kaloricketabulky.cz/user/meal/add/form/{guid}?for
 RECORD_RECIPE_URL = "https://www.kaloricketabulky.cz/user/recipe/add?format=json"
 CUSTOM_RECIPE_EDIT_URL = (
     "https://www.kaloricketabulky.cz/user/settings/meal/detail/edit/{guid}?format=json"
+)
+CUSTOM_RECIPE_IMAGE_CREATE_URL = (
+    "https://www.kaloricketabulky.cz/user/settings/meal/detail/{guid}/image/create?format=json"
 )
 CUSTOM_RECIPE_LIST_URL = "https://www.kaloricketabulky.cz/user/settings/meal/list?{query}"
 BASE_URL = "https://www.kaloricketabulky.cz/"
@@ -603,6 +606,46 @@ class KalorickeTabulkyClient:
             "servings": servings,
             "ingredient_count": len(resolved_ingredients),
             "endpoint": f"/user/settings/meal/detail/edit/{edit_guid}?format=json",
+        }
+
+    async def upload_custom_recipe_image(
+        self,
+        *,
+        recipe_guid: str,
+        image_bytes: bytes,
+        filename: str,
+        content_type: str = "image/jpeg",
+        field_name: str = "file",
+    ) -> dict[str, Any]:
+        form = FormData()
+        form.add_field(
+            field_name,
+            image_bytes,
+            filename=filename,
+            content_type=content_type,
+        )
+        response = await self._request_with_reauth(
+            "POST",
+            CUSTOM_RECIPE_IMAGE_CREATE_URL.format(guid=recipe_guid),
+            data=form,
+            headers={
+                "Accept": "*/*",
+                "Origin": "https://www.kaloricketabulky.cz",
+                "Referer": (
+                    "https://www.kaloricketabulky.cz/user/settings/meal/edit/"
+                    f"{recipe_guid}"
+                ),
+            },
+        )
+        return {
+            "message": response.get("message"),
+            "data": response.get("data"),
+            "recipe_guid": recipe_guid,
+            "filename": filename,
+            "content_type": content_type,
+            "field_name": field_name,
+            "size_bytes": len(image_bytes),
+            "endpoint": f"/user/settings/meal/detail/{recipe_guid}/image/create?format=json",
         }
 
     async def list_custom_recipes(

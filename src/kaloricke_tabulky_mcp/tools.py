@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import date
 import logging
 from typing import Any
@@ -21,6 +23,7 @@ from .models import (
     RecordRecipeServingRequest,
     RecordWeightRequest,
     SearchFoodRequest,
+    UploadCustomRecipeImageRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -458,6 +461,67 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         }
 
     @mcp.tool()
+    async def upload_custom_recipe_image(
+        account: str,
+        recipe_guid: str,
+        image_base64: str,
+        filename: str = "recipe-image.jpg",
+        content_type: str = "image/jpeg",
+        field_name: str = "file",
+        commit: bool = False,
+    ) -> dict[str, Any]:
+        """Preview or upload an image to an existing KT custom recipe.
+
+        Writes only with commit=true. image_base64 may be raw base64 or a
+        data:image/...;base64 URL. The default multipart field name is "file",
+        matching the observed KT image/create flow unless a future capture shows
+        another form field.
+        """
+        try:
+            request = UploadCustomRecipeImageRequest(
+                account=account,
+                recipe_guid=recipe_guid,
+                image_base64=image_base64,
+                filename=filename,
+                content_type=content_type,
+                field_name=field_name,
+                commit=commit,
+            )
+            image_bytes = _decode_base64_image(request.image_base64)
+            client = registry.get_write_client(request.account)
+        except (ValidationError, ValueError) as err:
+            return _error(err)
+
+        preview = {
+            "account": client.alias,
+            "mode": "commit" if request.commit else "preview",
+            "commit_required_for_write": True,
+            "write_supported": True,
+            "recipe_guid": request.recipe_guid,
+            "image_endpoint": (
+                f"/user/settings/meal/detail/{request.recipe_guid}/image/create?format=json"
+            ),
+            "filename": request.filename,
+            "content_type": request.content_type,
+            "field_name": request.field_name,
+            "size_bytes": len(image_bytes),
+        }
+        if not request.commit:
+            return preview
+
+        try:
+            written = await client.upload_custom_recipe_image(
+                recipe_guid=request.recipe_guid,
+                image_bytes=image_bytes,
+                filename=request.filename,
+                content_type=request.content_type,
+                field_name=request.field_name,
+            )
+        except KalorickeTabulkyError as err:
+            return _error(err)
+        return {**preview, "status": "written", "written_record": written}
+
+    @mcp.tool()
     async def record_recipe_serving(
         account: str,
         date: str,
@@ -625,6 +689,21 @@ def _recipe_payload_summary(payload: dict[str, Any] | None) -> dict[str, Any] | 
             if isinstance(item, dict)
         ],
     }
+
+
+def _decode_base64_image(value: str) -> bytes:
+    text = value.strip()
+    if "," in text and text[:64].lower().startswith("data:image/"):
+        text = text.split(",", 1)[1]
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as err:
+        raise ValueError("image_base64 must be valid base64 image data") from err
+    if not decoded:
+        raise ValueError("image_base64 decoded to empty data")
+    if len(decoded) > 5 * 1024 * 1024:
+        raise ValueError("image_base64 is too large; max decoded image size is 5 MB")
+    return decoded
 
 
 def _error(err: Exception) -> dict[str, Any]:

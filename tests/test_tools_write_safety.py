@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.write_calls = 0
         self.recipe_write_calls = 0
+        self.image_write_calls = 0
 
     async def resolve_food(self, **kwargs):
         return {
@@ -97,6 +99,17 @@ class FakeClient:
             "recipe_guid": kwargs.get("recipe_guid") or "recipe-guid-1",
             "title": kwargs["title"],
             "ingredient_count": len(kwargs["resolved_ingredients"]),
+        }
+
+    async def upload_custom_recipe_image(self, **kwargs):
+        self.image_write_calls += 1
+        return {
+            "message": "[recipe.image.save.success (cs)]",
+            "recipe_guid": kwargs["recipe_guid"],
+            "filename": kwargs["filename"],
+            "content_type": kwargs["content_type"],
+            "field_name": kwargs["field_name"],
+            "size_bytes": len(kwargs["image_bytes"]),
         }
 
     async def list_custom_recipes(self, **kwargs):
@@ -314,6 +327,52 @@ async def test_create_custom_recipe_commit_can_update_existing_recipe() -> None:
     assert result["status"] == "written"
     assert result["recipe_guid"] == "existing-recipe-guid"
     assert registry.client.recipe_write_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_custom_recipe_image_preview_does_not_write() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+    image_base64 = base64.b64encode(b"fake-image").decode("ascii")
+
+    result = await mcp.tools["upload_custom_recipe_image"](
+        account="personal",
+        recipe_guid="59c9d6bb6b534dbc993059ff986a380d",
+        image_base64=image_base64,
+        filename="bolonske.jpg",
+        content_type="image/jpeg",
+    )
+
+    assert result["mode"] == "preview"
+    assert result["image_endpoint"] == (
+        "/user/settings/meal/detail/59c9d6bb6b534dbc993059ff986a380d/image/create?format=json"
+    )
+    assert result["field_name"] == "file"
+    assert result["size_bytes"] == len(b"fake-image")
+    assert registry.client.image_write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_upload_custom_recipe_image_commit_writes_once() -> None:
+    mcp = FakeMCP()
+    registry = FakeRegistry()
+    setup_tools(mcp, registry)  # type: ignore[arg-type]
+    image_base64 = "data:image/png;base64," + base64.b64encode(b"png-image").decode("ascii")
+
+    result = await mcp.tools["upload_custom_recipe_image"](
+        account="personal",
+        recipe_guid="59c9d6bb6b534dbc993059ff986a380d",
+        image_base64=image_base64,
+        filename="bolonske.png",
+        content_type="image/png",
+        commit=True,
+    )
+
+    assert result["status"] == "written"
+    assert result["written_record"]["recipe_guid"] == "59c9d6bb6b534dbc993059ff986a380d"
+    assert result["written_record"]["content_type"] == "image/png"
+    assert registry.client.image_write_calls == 1
 
 
 @pytest.mark.asyncio
