@@ -311,55 +311,48 @@ class KalorickeTabulkyClient:
             await self._session.close()
 
     async def authenticate(self) -> None:
-        login_url = await self._resolve_login_url()
-        response = await self._session.post(
-            login_url,
-            json={
-                "email": self._credentials.email,
-                "password": md5(
-                    self._credentials.password.encode(), usedforsecurity=False
-                ).hexdigest(),
-            },
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Origin": "https://www.kaloricketabulky.cz",
-                "Referer": LOGIN_PAGE_URL,
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-                ),
-            },
-        )
-        body = await self._json_response(response)
-        if body.get("code") != 0:
-            raise InvalidAuthError(body.get("message") or "Invalid credentials")
+        attempts: list[dict[str, Any]] = []
+        for login_url in await self._login_urls():
+            response = await self._session.post(
+                login_url,
+                json={
+                    "email": self._credentials.email,
+                    "password": md5(
+                        self._credentials.password.encode(), usedforsecurity=False
+                    ).hexdigest(),
+                },
+                headers=_login_headers(),
+            )
+            try:
+                body = await self._json_response(response)
+            except KalorickeTabulkyError as err:
+                attempts.append(self._auth_attempt_diagnostic(login_url, response, error=str(err)))
+                continue
+            cookie_header = self._session_cookie_header(response)
+            attempts.append(self._auth_attempt_diagnostic(login_url, response, body=body))
+            if body.get("code") == 0:
+                if not cookie_header:
+                    raise InvalidAuthError("Authentication did not return session cookies")
+                self._cookies = cookie_header
+                return
 
-        cookie_header = self._session_cookie_header(response)
-        if not cookie_header:
-            raise InvalidAuthError("Authentication did not return session cookies")
+        raise InvalidAuthError(_auth_failure_message(self._credentials, attempts))
 
-        self._cookies = cookie_header
-
-    async def _resolve_login_url(self) -> str:
+    async def _login_urls(self) -> list[str]:
         response = await self._session.get(
             LOGIN_PAGE_URL,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-                ),
-            },
+            headers=_login_page_headers(),
         )
+        urls = []
         if response.status >= 400:
-            return LOGIN_URL
-        action = _extract_login_action(await response.text())
-        if not action:
-            return LOGIN_URL
-        url = urljoin(BASE_URL, action)
-        separator = "&" if "?" in url else "?"
-        return f"{url}{separator}voucher=false"
+            urls.append(LOGIN_URL)
+        else:
+            action = _extract_login_action(await response.text())
+            if action:
+                url = urljoin(BASE_URL, action)
+                urls.extend([_append_query_param(url, "voucher=false"), url])
+        urls.extend([_append_query_param(LOGIN_URL, "voucher=false"), LOGIN_URL])
+        return _dedupe(urls)
 
     def _session_cookie_header(self, response: ClientResponse) -> str:
         cookies = SimpleCookie()
@@ -368,6 +361,28 @@ class KalorickeTabulkyClient:
         for key, morsel in self._session.cookie_jar.filter_cookies(BASE_URL).items():
             cookies[key] = morsel.value
         return "; ".join(f"{key}={morsel.value}" for key, morsel in cookies.items())
+
+    def _auth_attempt_diagnostic(
+        self,
+        login_url: str,
+        response: ClientResponse,
+        *,
+        body: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        data = {
+            "url": login_url,
+            "status": response.status,
+            "content_type": response.headers.get("Content-Type"),
+            "set_cookie_names": _set_cookie_names(response),
+            "cookie_jar_names": sorted(self._session.cookie_jar.filter_cookies(BASE_URL)),
+        }
+        if body is not None:
+            data["code"] = body.get("code")
+            data["message"] = body.get("message")
+        if error:
+            data["error"] = error
+        return data
 
     async def auth_check(self) -> dict[str, Any]:
         await self.authenticate()
@@ -1475,6 +1490,57 @@ def _extract_login_action(text: str) -> str | None:
         if attrs.get("id") == "loginUrl" and attrs.get("action"):
             return attrs["action"]
     return None
+
+
+def _login_page_headers() -> dict[str, str]:
+    return {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": _browser_user_agent(),
+    }
+
+
+def _login_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://www.kaloricketabulky.cz",
+        "Referer": LOGIN_PAGE_URL,
+        "User-Agent": _browser_user_agent(),
+    }
+
+
+def _browser_user_agent() -> str:
+    return (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+    )
+
+
+def _append_query_param(url: str, param: str) -> str:
+    key = param.split("=", 1)[0]
+    if re.search(rf"([?&]){re.escape(key)}=", url):
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{param}"
+
+
+def _set_cookie_names(response: ClientResponse) -> list[str]:
+    cookies = SimpleCookie()
+    for header in response.headers.getall("Set-Cookie", []):
+        cookies.load(header)
+    return sorted(cookies)
+
+
+def _auth_failure_message(
+    credentials: AccountCredentials, attempts: list[dict[str, Any]]
+) -> str:
+    return (
+        "Invalid credentials; safe diagnostics: "
+        f"email={_mask_email(credentials.email)}, "
+        f"email_len={len(credentials.email)}, "
+        f"password_len={len(credentials.password)}, "
+        f"attempts={attempts}"
+    )
 
 
 def _form_input_names(text: str, form_start: int) -> list[str]:

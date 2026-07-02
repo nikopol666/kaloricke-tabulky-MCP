@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from kaloricke_tabulky_mcp.client import (
+    AccountCredentials,
+    LOGIN_URL,
+    _append_query_param,
+    _auth_failure_message,
     _default_recipe_tags,
     _apply_recipe_serving_selection,
     _apply_unit_selection,
@@ -105,6 +109,28 @@ def test_extract_login_action_from_hidden_input() -> None:
         )
         == "/login/create?=&format=json"
     )
+
+
+def test_append_query_param_preserves_existing_query() -> None:
+    assert (
+        _append_query_param("https://example.test/login/create?=&format=json", "voucher=false")
+        == "https://example.test/login/create?=&format=json&voucher=false"
+    )
+    assert _append_query_param(f"{LOGIN_URL}&voucher=true", "voucher=false").endswith(
+        "voucher=true"
+    )
+
+
+def test_auth_failure_message_exposes_only_safe_credential_metadata() -> None:
+    message = _auth_failure_message(
+        AccountCredentials(alias="luky", email="test@example.com", password="secret"),
+        [{"url": LOGIN_URL, "status": 200, "code": 10}],
+    )
+
+    assert "t***@example.com" in message
+    assert "password_len=6" in message
+    assert "secret" not in message
+    assert "test@example.com" not in message
 
 
 def test_extract_probe_scripts_normalizes_local_urls() -> None:
