@@ -13,6 +13,7 @@ from kaloricke_tabulky_mcp.client import (
     _recipe_portions,
     _extract_candidate_endpoints,
     _extract_login_action,
+    _login_headers,
     _extract_probe_forms,
     _extract_probe_scripts,
     _meal_type_from_time,
@@ -131,6 +132,15 @@ def test_auth_failure_message_exposes_only_safe_credential_metadata() -> None:
     assert "password_len=6" in message
     assert "secret" not in message
     assert "test@example.com" not in message
+
+
+def test_login_headers_match_browser_capture_shape() -> None:
+    headers = _login_headers()
+
+    assert headers["Accept"] == "application/json, text/plain, */*"
+    assert headers["Accept-Language"] == "en-US,en;q=0.9"
+    assert headers["Sec-Fetch-Site"] == "same-origin"
+    assert "Chrome/141.0.0.0" in headers["User-Agent"]
 
 
 def test_extract_probe_scripts_normalizes_local_urls() -> None:
