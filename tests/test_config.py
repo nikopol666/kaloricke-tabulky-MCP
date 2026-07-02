@@ -24,7 +24,7 @@ def test_loads_multiple_accounts_and_default() -> None:
     assert settings.mcp_bearer_token == "mcp-secret"
 
 
-def test_strips_account_credentials_from_environment() -> None:
+def test_strips_account_email_but_preserves_password() -> None:
     settings = load_settings(
         {
             "KT_ACCOUNTS": "personal",
@@ -34,7 +34,7 @@ def test_strips_account_credentials_from_environment() -> None:
     )
 
     assert settings.accounts["personal"].email == "user@example.com"
-    assert settings.accounts["personal"].password == "secret"
+    assert settings.accounts["personal"].password == " secret "
 
 
 def test_rejects_alias_collision() -> None:

@@ -98,7 +98,7 @@ def _parse_accounts(source: dict[str, str] | os._Environ[str], raw_aliases: str)
             )
         normalized_seen[env_suffix] = alias
         email = _clean_required_secret(source.get(f"KT_ACCOUNT_{env_suffix}_EMAIL"))
-        password = _clean_required_secret(source.get(f"KT_ACCOUNT_{env_suffix}_PASSWORD"))
+        password = _clean_required_password(source.get(f"KT_ACCOUNT_{env_suffix}_PASSWORD"))
         if not email or not password:
             raise ConfigError(
                 f"Missing KT_ACCOUNT_{env_suffix}_EMAIL or KT_ACCOUNT_{env_suffix}_PASSWORD"
@@ -136,3 +136,9 @@ def _clean_required_secret(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _clean_required_password(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value if value.strip() else None
