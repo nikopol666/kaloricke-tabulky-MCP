@@ -1199,21 +1199,35 @@ def _apply_unit_selection(
     unit: str | None,
     unit_guid: str | None,
 ) -> None:
-    if unit_guid:
-        payload["unitGuid"] = unit_guid
-        if amount is not None:
-            _validate_amount(amount)
-            payload["multiplier"] = amount
-        return
-    if amount is None:
-        return
-    _validate_amount(amount)
     raw_options = payload.get("unitOptions") or []
     options = [
         option
         for option in raw_options
         if isinstance(option, dict) and option.get("id")
     ]
+    if unit_guid:
+        if any(str(option.get("id")) == str(unit_guid) for option in options):
+            payload["unitGuid"] = unit_guid
+            if amount is not None:
+                _validate_amount(amount)
+                payload["multiplier"] = amount
+            return
+        if amount is None:
+            raise KalorickeTabulkyError(
+                f"unit_guid {unit_guid} is not available for {payload.get('title') or 'food'}"
+            )
+        _validate_amount(amount)
+        selected = _find_unit_option(options, amount, unit)
+        if selected is None:
+            raise KalorickeTabulkyError(
+                f"unit_guid {unit_guid} is not available for {payload.get('title') or 'food'}"
+            )
+        payload["unitGuid"] = selected["id"]
+        payload["multiplier"] = amount
+        return
+    if amount is None:
+        return
+    _validate_amount(amount)
     selected = _find_unit_option(options, amount, unit)
     if selected is None:
         payload["multiplier"] = amount

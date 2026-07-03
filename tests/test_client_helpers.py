@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from kaloricke_tabulky_mcp.client import (
     AccountCredentials,
+    KalorickeTabulkyError,
     LOGIN_URL,
     _append_query_param,
     _auth_failure_message,
@@ -208,6 +211,26 @@ def test_apply_unit_selection_tolerates_null_unit_options() -> None:
     _apply_unit_selection(payload, amount=1, unit="porce", unit_guid=None)
 
     assert payload["multiplier"] == 1
+
+
+def test_apply_unit_selection_rejects_unavailable_explicit_unit_guid() -> None:
+    payload = {
+        "title": "Smetana ke šlehání",
+        "unitOptions": [
+            {"id": "100g", "title": "100 g", "multiplier": 100},
+            {"id": "0000000000000001", "title": "1 g", "multiplier": 1},
+        ],
+    }
+
+    with pytest.raises(KalorickeTabulkyError, match="unit_guid 0000000000000002"):
+        _apply_unit_selection(
+            payload,
+            amount=250,
+            unit="ml",
+            unit_guid="0000000000000002",
+        )
+
+    assert payload.get("unitGuid") != "0000000000000002"
 
 
 def test_apply_recipe_serving_selection_scales_portions() -> None:
