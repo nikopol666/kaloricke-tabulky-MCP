@@ -136,7 +136,9 @@ class FakeClient:
 
 class FakeRegistry:
     def __init__(self) -> None:
-        self.settings = SimpleNamespace(timezone="Europe/Prague")
+        self.settings = SimpleNamespace(
+            timezone="Europe/Prague", enable_diagnostics=True
+        )
         self.client = FakeClient()
 
     def safe_health(self):

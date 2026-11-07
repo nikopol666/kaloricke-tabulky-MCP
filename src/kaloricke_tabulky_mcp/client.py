@@ -10,6 +10,7 @@ from html import unescape
 from http.cookies import SimpleCookie
 from math import isfinite
 import re
+import logging
 import unicodedata
 from typing import Any
 from urllib.parse import urlencode, urljoin
@@ -17,7 +18,10 @@ from urllib.parse import urlencode, urljoin
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, FormData
 
 from .clock import local_now, local_today
+from .errors import safe_text, short_error
 from .diary import compact_diary, duplicate_entries, find_duplicate, resolved_entry
+
+logger = logging.getLogger(__name__)
 
 LOGIN_PAGE_URL = "https://www.kaloricketabulky.cz/login"
 LOGIN_URL = "https://www.kaloricketabulky.cz/login/create?format=json"
@@ -219,6 +223,9 @@ IGNORED_SUMMARY_KEYS = {
 class KalorickeTabulkyError(Exception):
     """Base error for Kaloricke Tabulky API failures."""
 
+    def __init__(self, message: str) -> None:
+        super().__init__(short_error(message))
+
 
 class AmbiguousFoodError(KalorickeTabulkyError):
     """A caller must select a GUID or explicitly opt into fuzzy selection."""
@@ -322,6 +329,8 @@ class KalorickeTabulkyClient:
         timezone: str | None = None,
         max_concurrency: int = 4,
     ) -> None:
+        self._auth_lock = asyncio.Lock()
+        self._auth_generation = 0
         self._credentials = credentials
         self.timezone = timezone
         if not 1 <= max_concurrency <= 32:
@@ -344,7 +353,19 @@ class KalorickeTabulkyClient:
         if self._owns_session and not self._session.closed:
             await self._session.close()
 
-    async def authenticate(self) -> None:
+    async def authenticate(self, *, expected_generation: int | None = None) -> None:
+        generation = (
+            self._auth_generation
+            if expected_generation is None
+            else expected_generation
+        )
+        async with self._auth_lock:
+            if self._cookies is not None and generation != self._auth_generation:
+                return
+            await self._authenticate()
+            self._auth_generation += 1
+
+    async def _authenticate(self) -> None:
         attempts: list[dict[str, Any]] = []
         for login_url in await self._login_urls():
             response = await self._session.post(
@@ -356,17 +377,30 @@ class KalorickeTabulkyClient:
                 headers=_login_headers(),
             )
             try:
-                body = await self._json_response(response)
-            except KalorickeTabulkyError as err:
-                attempts.append(self._auth_attempt_diagnostic(login_url, response, error=str(err)))
-                continue
-            cookie_header = self._session_cookie_header(response)
-            attempts.append(self._auth_attempt_diagnostic(login_url, response, body=body))
-            if body.get("code") == 0:
-                if not cookie_header:
-                    raise InvalidAuthError("Authentication did not return session cookies")
-                self._cookies = cookie_header
-                return
+                try:
+                    body = await self._json_response(response)
+                    if not isinstance(body, dict):
+                        raise self._response_error("Unexpected login response", body)
+                except KalorickeTabulkyError as err:
+                    attempts.append(
+                        self._auth_attempt_diagnostic(
+                            login_url, response, error=str(err)
+                        )
+                    )
+                    continue
+                cookie_header = self._session_cookie_header(response)
+                attempts.append(
+                    self._auth_attempt_diagnostic(login_url, response, body=body)
+                )
+                if body.get("code") == 0:
+                    if not cookie_header:
+                        raise InvalidAuthError(
+                            "Authentication did not return session cookies"
+                        )
+                    self._cookies = cookie_header
+                    return
+            finally:
+                response.release()
 
         raise InvalidAuthError(_auth_failure_message(self._credentials, attempts))
 
@@ -375,16 +409,19 @@ class KalorickeTabulkyClient:
             LOGIN_PAGE_URL,
             headers=_login_page_headers(),
         )
-        urls = []
-        if response.status >= 400:
-            urls.append(LOGIN_URL)
-        else:
-            action = _extract_login_action(await response.text())
-            if action:
-                url = urljoin(BASE_URL, action)
-                urls.extend([_append_query_param(url, "voucher=false"), url])
-        urls.extend([_append_query_param(LOGIN_URL, "voucher=false"), LOGIN_URL])
-        return _dedupe(urls)
+        try:
+            urls = []
+            if response.status >= 400:
+                urls.append(LOGIN_URL)
+            else:
+                action = _extract_login_action(await response.text())
+                if action:
+                    url = urljoin(BASE_URL, action)
+                    urls.extend([_append_query_param(url, "voucher=false"), url])
+            urls.extend([_append_query_param(LOGIN_URL, "voucher=false"), LOGIN_URL])
+            return _dedupe(urls)
+        finally:
+            response.release()
 
     def _session_cookie_header(self, response: ClientResponse) -> str:
         cookies = SimpleCookie()
@@ -411,7 +448,7 @@ class KalorickeTabulkyClient:
         }
         if body is not None:
             data["code"] = body.get("code")
-            data["message"] = body.get("message")
+            data["message"] = safe_text(body.get("message"), self._sensitive_values())
         if error:
             data["error"] = error
         return data
@@ -528,11 +565,39 @@ class KalorickeTabulkyClient:
             "GET", SEARCH_FOOD_URL.format(kind=search_kind, query=query_string)
         )
         if not isinstance(body, list):
-            raise KalorickeTabulkyError(f"Unexpected search response: {body}")
+            raise self._response_error("Unexpected search response", body)
         results = [_normalize_search_result(item) for item in body if isinstance(item, dict)]
         return results[:limit] if limit is not None else results
 
     async def resolve_food(
+        self,
+        *,
+        query: str | None = None,
+        food_guid: str | None = None,
+        kind: str = "food",
+        amount: float | None = None,
+        unit: str | None = None,
+        unit_guid: str | None = None,
+        target_date: date,
+        target_time: str | None = None,
+        meal_type: str | None = None,
+        allow_fuzzy: bool = False,
+    ) -> dict[str, Any]:
+        async with self.work_semaphore:
+            return await self._resolve_food(
+                query=query,
+                food_guid=food_guid,
+                kind=kind,
+                amount=amount,
+                unit=unit,
+                unit_guid=unit_guid,
+                target_date=target_date,
+                target_time=target_time,
+                meal_type=meal_type,
+                allow_fuzzy=allow_fuzzy,
+            )
+
+    async def _resolve_food(
         self,
         *,
         query: str | None = None,
@@ -559,7 +624,7 @@ class KalorickeTabulkyClient:
         )
         form = form_body.get("data")
         if not isinstance(form, dict):
-            raise KalorickeTabulkyError(f"Unexpected add form response: {form_body}")
+            raise self._response_error("Unexpected add form response", form_body)
 
         payload = dict(form)
         payload["date"] = self._format_date(target_date)
@@ -622,6 +687,32 @@ class KalorickeTabulkyClient:
         meal_type: str | None = None,
         allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
+        async with self.work_semaphore:
+            return await self._resolve_recipe_serving(
+                query=query,
+                recipe_guid=recipe_guid,
+                amount=amount,
+                unit=unit,
+                unit_guid=unit_guid,
+                target_date=target_date,
+                target_time=target_time,
+                meal_type=meal_type,
+                allow_fuzzy=allow_fuzzy,
+            )
+
+    async def _resolve_recipe_serving(
+        self,
+        *,
+        query: str | None = None,
+        recipe_guid: str | None = None,
+        amount: float | None = None,
+        unit: str | None = None,
+        unit_guid: str | None = None,
+        target_date: date,
+        target_time: str | None = None,
+        meal_type: str | None = None,
+        allow_fuzzy: bool = False,
+    ) -> dict[str, Any]:
         recipe_lookup: dict[str, Any] | None = None
         if recipe_guid is None:
             if not query:
@@ -642,7 +733,7 @@ class KalorickeTabulkyClient:
         )
         form = form_body.get("data")
         if not isinstance(form, dict):
-            raise KalorickeTabulkyError(f"Unexpected recipe add form response: {form_body}")
+            raise self._response_error("Unexpected recipe add form response", form_body)
 
         payload = dict(form)
         payload["date"] = self._format_date(target_date)
@@ -883,10 +974,10 @@ class KalorickeTabulkyClient:
             headers={"Accept": "application/json, text/plain, */*"},
         )
         if not isinstance(body, dict):
-            raise KalorickeTabulkyError(f"Unexpected custom recipe list response: {body}")
+            raise self._response_error("Unexpected custom recipe list response", body)
         data = body.get("data") or []
         if not isinstance(data, list):
-            raise KalorickeTabulkyError(f"Unexpected custom recipe list response: {body}")
+            raise self._response_error("Unexpected custom recipe list response", body)
         return {
             "account": self.alias,
             "query": query,
@@ -923,42 +1014,41 @@ class KalorickeTabulkyClient:
             "probes": probes,
             "candidate_endpoints": sorted(discovered),
             "blocked_write_reason": (
-                "Custom recipe creation still needs a verified authenticated POST "
-                "URL and payload. This tool only reads candidate form pages and "
-                "does not call add/save JSON endpoints."
+                "This diagnostic tool only reads form pages and never writes. "
+                "Custom recipe creation is supported by create_custom_recipe "
+                "with an explicit account and commit=true."
             ),
         }
+
+    async def _with_reauth(
+        self, operation: Any, method: str, url: str, **kwargs: Any
+    ) -> Any:
+        generation = self._auth_generation
+        if self._cookies is None:
+            await self.authenticate(expected_generation=generation)
+        generation = self._auth_generation
+        try:
+            return await operation(method, url, **kwargs)
+        except SessionExpiredError:
+            await self.authenticate(expected_generation=generation)
+            return await operation(method, url, **kwargs)
 
     async def _request_with_reauth(
         self, method: str, url: str, **kwargs: Any
     ) -> dict[str, Any]:
-        if self._cookies is None:
-            await self.authenticate()
-
-        try:
-            return await self._request(method, url, **kwargs)
-        except SessionExpiredError:
-            await self.authenticate()
-            return await self._request(method, url, **kwargs)
+        return await self._with_reauth(self._request, method, url, **kwargs)
 
     async def _request_any_with_reauth(
         self, method: str, url: str, **kwargs: Any
     ) -> Any:
-        if self._cookies is None:
-            await self.authenticate()
-
-        try:
-            return await self._request_any(method, url, **kwargs)
-        except SessionExpiredError:
-            await self.authenticate()
-            return await self._request_any(method, url, **kwargs)
+        return await self._with_reauth(self._request_any, method, url, **kwargs)
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         body = await self._request_any(method, url, **kwargs)
         if not isinstance(body, dict):
-            raise KalorickeTabulkyError(f"Unexpected API response: {body}")
+            raise self._response_error("Unexpected API response", body)
         if body.get("code") != 0:
-            raise KalorickeTabulkyError(body.get("message") or f"Unexpected API response: {body}")
+            raise self._response_error("KT API error", body)
         return body
 
     async def _request_any(self, method: str, url: str, **kwargs: Any) -> Any:
@@ -967,22 +1057,26 @@ class KalorickeTabulkyClient:
         response = await self._session.request(
             method, url, headers=headers, allow_redirects=False, **kwargs
         )
-        body = await self._json_response(response)
-        if response.status in (301, 302, 303, 307, 308):
-            raise SessionExpiredError("Session expired")
-        if isinstance(body, dict) and body.get("code") not in (None, 0):
-            raise KalorickeTabulkyError(body.get("message") or f"Unexpected API response: {body}")
-        return body
+        try:
+            body = await self._json_response(response)
+            if isinstance(body, dict) and body.get("code") not in (None, 0):
+                if _session_expired_message(body.get("message")):
+                    raise SessionExpiredError("Session expired (API login message)")
+                raise self._response_error(
+                    "KT API error", body, response.headers.get("Content-Type")
+                )
+            if response.status >= 400:
+                raise self._response_error(
+                    f"HTTP {response.status}",
+                    body,
+                    response.headers.get("Content-Type"),
+                )
+            return body
+        finally:
+            response.release()
 
     async def _request_text_with_reauth(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
-        if self._cookies is None:
-            await self.authenticate()
-
-        result = await self._request_text(method, url, **kwargs)
-        if result["status"] in (301, 302, 303, 307, 308):
-            await self.authenticate()
-            result = await self._request_text(method, url, **kwargs)
-        return result
+        return await self._with_reauth(self._request_text, method, url, **kwargs)
 
     async def _request_text(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = dict(kwargs.pop("headers", {}))
@@ -991,24 +1085,71 @@ class KalorickeTabulkyClient:
         response = await self._session.request(
             method, url, headers=headers, allow_redirects=False, **kwargs
         )
-        text = await response.text()
-        return {
-            "url": url,
-            "status": response.status,
-            "content_type": response.headers.get("Content-Type", ""),
-            "location": response.headers.get("Location"),
-            "text": text,
-        }
-
-    @staticmethod
-    async def _json_response(response: ClientResponse) -> Any:
-        content_type = response.headers.get("Content-Type", "")
-        if response.status in (301, 302, 303, 307, 308):
-            raise SessionExpiredError("Session expired")
-        if "json" not in content_type:
+        try:
+            if response.status in (301, 302, 303, 307, 308, 401, 403):
+                raise SessionExpiredError(f"Session expired (HTTP {response.status})")
             text = await response.text()
-            raise KalorickeTabulkyError(f"Unexpected non-JSON response: {text[:200]}")
-        return await response.json()
+            if "json" in response.headers.get("Content-Type", "").lower():
+                try:
+                    body = await response.json()
+                except (ValueError, UnicodeError):
+                    body = None
+                if (
+                    isinstance(body, dict)
+                    and body.get("code") not in (None, 0)
+                    and _session_expired_message(body.get("message"))
+                ):
+                    raise SessionExpiredError("Session expired (API login message)")
+            return {
+                "url": url,
+                "status": response.status,
+                "content_type": response.headers.get("Content-Type", ""),
+                "location": response.headers.get("Location"),
+                "text": text,
+            }
+        finally:
+            response.release()
+
+    async def _json_response(self, response: ClientResponse) -> Any:
+        content_type = response.headers.get("Content-Type", "")
+        if response.status in (301, 302, 303, 307, 308, 401, 403):
+            raise SessionExpiredError(f"Session expired (HTTP {response.status})")
+        if "json" not in content_type.lower():
+            raise self._response_error(
+                "Unexpected non-JSON response", await response.text(), content_type
+            )
+        try:
+            return await response.json()
+        except (ValueError, UnicodeError) as err:
+            raise self._response_error(
+                "Invalid JSON response", await response.text(), content_type
+            ) from err
+
+    def _sensitive_values(self) -> list[str]:
+        values = [
+            self._credentials.password,
+            self._credentials.login_password_hash(),
+            self._cookies or "",
+        ]
+        if self._cookies:
+            values.extend(
+                item.partition("=")[2].strip()
+                for item in self._cookies.split(";")
+                if "=" in item
+            )
+        return values
+
+    def _response_error(
+        self, label: str, body: Any, content_type: str | None = None
+    ) -> KalorickeTabulkyError:
+        text = safe_text(body, self._sensitive_values())
+        kind = type(body).__name__ + (
+            f", {safe_text(content_type, self._sensitive_values())}"
+            if content_type
+            else ""
+        )
+        logger.debug("%s (%s): %s", label, kind, text)
+        return KalorickeTabulkyError(f"{label} ({kind}): {text}")
 
     @staticmethod
     def _format_date(value: date) -> str:
@@ -1299,6 +1440,29 @@ def _search_kind(value: str) -> str:
         return SEARCH_KINDS[value]
     except KeyError as err:
         raise KalorickeTabulkyError("kind must be food or drink") from err
+
+
+# Conservative login-message allowlist. Exact live KT wording still needs a
+# captured response; unrelated business errors must never cause a relogin.
+SESSION_EXPIRED_MESSAGES = (
+    "session expired",
+    "authentication required",
+    "not authenticated",
+    "login required",
+    "prihlaste se",
+    "nejste prihlasen",
+    "platnost prihlaseni vyprsela",
+)
+
+
+def _session_expired_message(message: Any) -> bool:
+    if not isinstance(message, str):
+        return False
+    normalized = _normalized_title(message)
+    return any(
+        re.search(r"(?<!\w)" + re.escape(marker) + r"(?!\w)", normalized)
+        for marker in SESSION_EXPIRED_MESSAGES
+    )
 
 
 def _normalized_title(value: str) -> str:

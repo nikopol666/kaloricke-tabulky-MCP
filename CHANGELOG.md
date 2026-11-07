@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — phase 3
+
+- Coalesce concurrent authentication/refresh operations with a lock and session
+  generation counter. Retry expired requests once for redirects, HTTP 401/403,
+  and a conservative login-message allowlist; unrelated errors do not relogin.
+- Bound API errors to 300 characters and redact credentials from both user
+  errors and full DEBUG diagnostics. Release HTTP responses on failure paths.
+- Resolve batch/recipe ingredients concurrently using the same semaphore as
+  range reads; preserve input/result order and sequential diary writes.
+- Gate raw/probe MCP tools behind `KT_ENABLE_DIAGNOSTICS=false`, correct the
+  outdated recipe-write diagnostic, and revise all MCP tool descriptions.
+- Exact live KT JSON expiry wording remains unverified. The phase 2 live diary
+  mapping and deletion endpoint blockers remain unchanged.
+
 ## Unreleased — phase 2 draft
 
 - Add `get_diary_range` with inclusive 92-day validation, bounded parallel reads,

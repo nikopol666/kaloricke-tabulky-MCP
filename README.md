@@ -45,6 +45,7 @@ KT_ACCOUNT_PARTNER_PASSWORD=replace-me
 KT_DEFAULT_ACCOUNT=personal
 KT_TIMEZONE=Europe/Prague
 KT_MAX_CONCURRENCY=4
+KT_ENABLE_DIAGNOSTICS=false
 MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
@@ -108,6 +109,38 @@ payload. Live verification on a test account is still required before relying
 on this integration. No real KT requests are made by the tests.
 
 ## Tools
+
+### Robustness and diagnostics (phase 3)
+
+Concurrent requests on one client share a locked authentication refresh. A
+session generation counter prevents late failures from triggering another
+login after another request already refreshed the session. Requests retry once
+after a redirect, HTTP 401/403, or a nonzero API code with a recognized login
+message. A second authentication failure is returned without another retry.
+Unrelated business errors do not trigger login.
+
+The JSON login-message allowlist is conservative and tested with synthetic
+English/Czech messages. **The exact live KT expiry message still needs a captured
+response to complete that verification of phase 3.2.** HTTP status handling and
+concurrent login behavior are covered by a local fake HTTP server.
+
+API error text is limited to 300 characters and includes the response type.
+Sanitized full error bodies are available only at DEBUG level. Passwords,
+password-equivalent hashes, known session cookie values and named credential
+fields are redacted before both error rendering and DEBUG logging.
+
+Food and ingredient resolution in batches, recipe preparation and recipe
+creation runs concurrently under the same per-client `KT_MAX_CONCURRENCY`
+semaphore as daily range reads. Results retain input order; diary writes remain
+sequential. `continue_on_error=false` stops reported results at the first input
+error and stops subsequent writes after a write error. Read lookups already
+started concurrently may finish; any resolution error prevents all writes.
+
+`KT_ENABLE_DIAGNOSTICS` defaults to `false`. Only when enabled are
+`probe_user_meal_endpoints` and the token-heavy raw `get_diary_detail` registered
+as MCP tools. Their internal client methods remain usable by normal diary and
+duplicate-check workflows. Health, compact diary and range tools remain
+available with diagnostics off.
 
 ### `get_diary_range(account, date_from, date_to)`
 

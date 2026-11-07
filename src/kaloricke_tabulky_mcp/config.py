@@ -33,6 +33,7 @@ class Settings:
     log_level: str
     timezone: str = "Europe/Prague"
     max_concurrency: int = 4
+    enable_diagnostics: bool = False
 
 
 class RawSettings(BaseSettings):
@@ -42,6 +43,7 @@ class RawSettings(BaseSettings):
 
     kt_timezone: str = "Europe/Prague"
     kt_max_concurrency: int = Field(default=4, ge=1, le=32)
+    kt_enable_diagnostics: bool = False
     kt_accounts: str = Field(default="", description="Comma-separated account aliases")
     kt_default_account: str | None = Field(default=None)
     mcp_server_name: str = Field(default="Kaloricke Tabulky MCP")
@@ -59,6 +61,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if env is not None:
         raw = RawSettings.model_validate(
             {
+                "kt_enable_diagnostics": source.get("KT_ENABLE_DIAGNOSTICS", "false"),
                 "kt_max_concurrency": source.get("KT_MAX_CONCURRENCY", "4"),
                 "kt_timezone": source.get("KT_TIMEZONE", "Europe/Prague"),
                 "kt_accounts": source.get("KT_ACCOUNTS", ""),
@@ -85,6 +88,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     return Settings(
         timezone=raw.kt_timezone,
         max_concurrency=raw.kt_max_concurrency,
+        enable_diagnostics=raw.kt_enable_diagnostics,
         accounts=accounts,
         default_account=default_account,
         mcp_server_name=raw.mcp_server_name,
