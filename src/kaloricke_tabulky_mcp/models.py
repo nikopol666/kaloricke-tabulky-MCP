@@ -320,3 +320,39 @@ class RecordWeightRequest(StrictModel):
         if numeric is None:
             raise ValueError("weight_kg is required")
         return numeric
+
+
+class DiaryRangeRequest(StrictModel):
+    account: str = Field(min_length=1)
+    date_from: Date
+    date_to: Date
+
+    @field_validator("date_from", "date_to", mode="before")
+    @classmethod
+    def _date(cls, value: str | Date) -> Date:
+        if value in (None, ""):
+            raise ValueError("Both range dates are required")
+        return parse_date(value)
+
+    @model_validator(mode="after")
+    def _range(self) -> "DiaryRangeRequest":
+        days = (self.date_to - self.date_from).days + 1
+        if not 1 <= days <= 92:
+            raise ValueError("Diary range must contain 1 to 92 days, inclusive")
+        return self
+
+
+class DiaryEntriesRequest(DiarySummaryRequest):
+    account: str = Field(min_length=1)
+
+
+class DeleteDiaryEntryRequest(DiaryEntriesRequest):
+    entry_guid: str = Field(min_length=1, max_length=128)
+    commit: bool = False
+
+    @field_validator("entry_guid")
+    @classmethod
+    def _guid(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise ValueError("entry_guid must be a diary entry identifier")
+        return value

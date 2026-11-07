@@ -19,7 +19,7 @@ def _number(value: Any) -> float:
     return number
 
 
-def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
+def _diary_entries(detail: dict[str, Any], *, display: bool = False) -> list[dict[str, Any]]:
     """Accept explicit foodstuff/entries collections, optionally grouped by meal.
 
     These field mappings are tested with synthetic fixtures. Live KT payloads
@@ -67,15 +67,22 @@ def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
                 )
             if str(meal) not in {"1", "2", "3", "4", "5", "6"}:
                 raise ValueError("Unrecognized diary meal identifier")
-            entries.append(
-                {
-                    "entry_guid": str(entry),
-                    "food_guid": str(food),
-                    "meal_type": str(meal),
-                    "unit_guid": str(unit),
-                    "multiplier": _number(amount),
+            normalized = {
+                "entry_guid": str(entry), "food_guid": str(food), "meal_type": str(meal),
+                "unit_guid": str(unit), "multiplier": _number(amount),
+            }
+            if display:
+                normalized = {
+                    "entry_guid": str(entry), "food_guid": str(food), "meal_type": str(meal),
+                    "time": value.get("time"), "title": value.get("title"),
+                    "amount": _number(amount), "unit": value.get("unit"),
+                    **{key: _optional_total(value.get(key)) for key in COMPACT_NUTRIENTS},
                 }
-            )
+                if not isinstance(normalized["title"], str) or not normalized["title"].strip():
+                    raise ValueError("Missing diary entry title")
+                if not isinstance(normalized["unit"], str) or not normalized["unit"].strip():
+                    raise ValueError("Missing diary unit label")
+            entries.append(normalized)
             return  # A recipe's ingredients are not separate diary entries.
         containers = [
             k for k in ("foodstuff", "entries", "meals", "items") if k in value
@@ -135,3 +142,45 @@ def find_duplicate(
         ),
         None,
     )
+
+
+COMPACT_NUTRIENTS = ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g")
+
+
+def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    return _diary_entries(detail)
+
+
+def _optional_total(value: Any) -> float | None:
+    if value is None:
+        return None
+    number = float(str(value).replace("\u00a0", "").replace(" ", "").replace(",", "."))
+    if not isfinite(number) or number < 0:
+        raise ValueError("Invalid diary nutrient total")
+    return number
+
+
+def _totals(entries: list[dict[str, Any]]) -> dict[str, float | None]:
+    return {
+        key: sum(row[key] for row in entries) if all(row[key] is not None for row in entries) else None
+        for key in COMPACT_NUTRIENTS
+    }
+
+
+def compact_diary(detail: dict[str, Any]) -> dict[str, Any]:
+    """Draft adapter: nutrient totals require explicit *_kcal/*_g fields.
+
+    Do not guess whether a raw KT nutrient field means per-gram or entry total.
+    A live anonymized fixture is required to extend/verify these mappings.
+    """
+    entries = _diary_entries(detail, display=True)
+    seen = set()
+    for entry in entries:
+        if entry["entry_guid"] in seen:
+            raise ValueError("Duplicate diary entry identifiers")
+        seen.add(entry["entry_guid"])
+    meals = []
+    for meal_type in sorted({row["meal_type"] for row in entries}):
+        rows = [row for row in entries if row["meal_type"] == meal_type]
+        meals.append({"meal_type": meal_type, "entries": rows, "totals": _totals(rows)})
+    return {"entries": entries, "meals": meals, "totals": _totals(entries)}

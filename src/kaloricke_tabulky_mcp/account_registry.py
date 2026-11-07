@@ -97,6 +97,7 @@ class AccountRegistry:
             credentials,
             request_timeout=self._settings.request_timeout,
             timezone=self._settings.timezone,
+            max_concurrency=self._settings.max_concurrency,
         )
         self._clients[alias] = client
         return client

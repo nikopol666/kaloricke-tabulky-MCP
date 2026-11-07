@@ -32,6 +32,7 @@ class Settings:
     max_retries: int
     log_level: str
     timezone: str = "Europe/Prague"
+    max_concurrency: int = 4
 
 
 class RawSettings(BaseSettings):
@@ -40,6 +41,7 @@ class RawSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     kt_timezone: str = "Europe/Prague"
+    kt_max_concurrency: int = Field(default=4, ge=1, le=32)
     kt_accounts: str = Field(default="", description="Comma-separated account aliases")
     kt_default_account: str | None = Field(default=None)
     mcp_server_name: str = Field(default="Kaloricke Tabulky MCP")
@@ -57,6 +59,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if env is not None:
         raw = RawSettings.model_validate(
             {
+                "kt_max_concurrency": source.get("KT_MAX_CONCURRENCY", "4"),
                 "kt_timezone": source.get("KT_TIMEZONE", "Europe/Prague"),
                 "kt_accounts": source.get("KT_ACCOUNTS", ""),
                 "kt_default_account": source.get("KT_DEFAULT_ACCOUNT"),
@@ -81,6 +84,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         raise ConfigError("KT_DEFAULT_ACCOUNT must match one configured account alias")
     return Settings(
         timezone=raw.kt_timezone,
+        max_concurrency=raw.kt_max_concurrency,
         accounts=accounts,
         default_account=default_account,
         mcp_server_name=raw.mcp_server_name,

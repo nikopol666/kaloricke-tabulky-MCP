@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — phase 2 draft
+
+- Add `get_diary_range` with inclusive 92-day validation, bounded parallel reads,
+  standard nutrient units, explicit missing values and averages over logged days.
+- Add validated `KT_MAX_CONCURRENCY` (default 4) and Compose forwarding.
+- Develop a compact diary adapter and grouped totals using a clearly synthetic
+  fixture. A real anonymized KT response is still required to finish phase 2.2.
+- Add membership-checked deletion previews. Actual deletion remains disabled
+  until its method, endpoint and body are verified; phase 2.3 is not complete.
+
 ## 0.2.0
 
 Phase 1: prevent silent diary data errors.
@@ -15,4 +25,4 @@ Phase 1: prevent silent diary data errors.
 - Add mocked regression tests and local HTTP integration tests. Live test-account
   verification and confirmation of diary payload mappings remain pending.
 
-Phases 2 and 3 are not included in this release.
+Phase 1 changes are kept separately from later work in Git history.

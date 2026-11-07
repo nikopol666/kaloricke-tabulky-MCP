@@ -1,0 +1,32 @@
+{
+  "date": "2026-01-01",
+  "data": {
+    "meals": [
+      {
+        "diaryTimeGuid": "3",
+        "foodstuff": [
+          {
+            "guid": "entry-rice", "foodstuffGuid": "rice", "title": "Rýže",
+            "time": "13:00", "unitGuid": "g", "multiplier": 100, "unit": "g",
+            "energy_kcal": 130, "protein_g": 2.5, "carbohydrate_g": 28, "fat_g": 0.3
+          },
+          {
+            "guid": "entry-chicken", "foodstuffGuid": "chicken", "title": "Kuře",
+            "time": "13:00", "unitGuid": "g", "multiplier": 100, "unit": "g",
+            "energy_kcal": 165, "protein_g": 31, "carbohydrate_g": 0, "fat_g": 3.6
+          }
+        ]
+      },
+      {
+        "diaryTimeGuid": "5",
+        "foodstuff": [
+          {
+            "guid": "entry-soup", "foodstuffGuid": "soup", "title": "Polévka",
+            "time": "19:00", "unitGuid": "portion", "multiplier": 1, "unit": "porce",
+            "energy_kcal": 100, "protein_g": 4, "carbohydrate_g": 15, "fat_g": 2
+          }
+        ]
+      }
+    ]
+  }
+}

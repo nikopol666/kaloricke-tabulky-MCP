@@ -44,6 +44,7 @@ KT_ACCOUNT_PARTNER_PASSWORD=replace-me
 # KT_ACCOUNT_PARTNER_PASSWORD_MD5=32-character-browser-md5
 KT_DEFAULT_ACCOUNT=personal
 KT_TIMEZONE=Europe/Prague
+KT_MAX_CONCURRENCY=4
 MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
@@ -107,6 +108,47 @@ payload. Live verification on a test account is still required before relying
 on this integration. No real KT requests are made by the tests.
 
 ## Tools
+
+### `get_diary_range(account, date_from, date_to)`
+
+Read an inclusive range of up to 92 days (`YYYY-MM-DD`). Returns ordered daily
+rows with `logged`, energy in kcal, protein/carbohydrate/fat/fiber/sugar/salt in g,
+an energy target and weight in kg when available. Missing values remain `null`.
+Energy in kJ and nutrient amounts in mg are converted to the advertised units.
+Weight records are used only when explicitly associated with the requested date.
+
+The summary includes `days_with_record`, `empty_days`, `averages` and per-metric
+`average_sample_counts`. A day is logged if its detail contains diary entries or
+its nutrition summary contains positive intake; goals/weight alone do not count.
+Empty days are excluded from averages. Missing metrics on logged days are also
+excluded from that metric's average. Read failures fail the range rather than
+silently becoming empty days. `KT_MAX_CONCURRENCY` (default 4, range 1–32) limits
+parallel daily reads per account/client.
+
+### Draft: `get_diary_entries(account, date=None)`
+
+Returns compact entries with `entry_guid`, `food_guid`, `meal_type`, `time`,
+`title`, `amount`, `unit`, `energy_kcal`, `protein_g`, `carbohydrate_g`, `fat_g`.
+Entries are also grouped into `meals`, with meal and day `totals`. Missing
+nutrients make the corresponding total `null`, rather than an understated sum.
+
+**Phase 2.2 is not yet complete.** The adapter is tested with the explicitly
+synthetic `tests/fixtures/diary_synthetic.json`; an anonymized live KT capture
+has not been supplied. Only explicit entry-total nutrient fields are recognized;
+per-unit scaling is intentionally not guessed. Unsupported payloads fail with
+an error. `get_diary_detail` remains the larger raw diagnostic response.
+
+### Draft: `delete_diary_entry(account, date, entry_guid, commit=false)`
+
+Checks that the entry exists in the requested day and previews its title,
+quantity and meal. Preview returns `write_supported: false`.
+
+**Phase 2.3 is blocked pending an authenticated browser capture of the deletion
+request.** The endpoint, HTTP method and payload are not known and no deletion
+endpoint has been invented. `commit=true` currently returns an error and makes
+no deletion request. To finish this feature, record the actual method, URL and
+body in DevTools on a test account, excluding cookies/credentials, document it
+here, and add mocked endpoint tests before enabling writes.
 
 ### `list_accounts`
 

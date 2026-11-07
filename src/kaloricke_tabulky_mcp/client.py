@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from hashlib import md5
 from html import unescape
 from http.cookies import SimpleCookie
@@ -17,7 +17,7 @@ from urllib.parse import urlencode, urljoin
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, FormData
 
 from .clock import local_now, local_today
-from .diary import duplicate_entries, find_duplicate, resolved_entry
+from .diary import compact_diary, duplicate_entries, find_duplicate, resolved_entry
 
 LOGIN_PAGE_URL = "https://www.kaloricketabulky.cz/login"
 LOGIN_URL = "https://www.kaloricketabulky.cz/login/create?format=json"
@@ -320,9 +320,13 @@ class KalorickeTabulkyClient:
         request_timeout: int = 30,
         session: ClientSession | None = None,
         timezone: str | None = None,
+        max_concurrency: int = 4,
     ) -> None:
         self._credentials = credentials
         self.timezone = timezone
+        if not 1 <= max_concurrency <= 32:
+            raise ValueError("max_concurrency must be between 1 and 32")
+        self.work_semaphore = asyncio.Semaphore(max_concurrency)
         self.diary_write_lock = asyncio.Lock()
         self._owns_session = session is None
         self._session = session or ClientSession(timeout=ClientTimeout(total=request_timeout))
@@ -416,7 +420,9 @@ class KalorickeTabulkyClient:
         await self.authenticate()
         return {"account": self.alias, "status": "ok"}
 
-    async def get_summary(self, target_date: date | None = None) -> SummaryData:
+    async def get_summary(
+        self, target_date: date | None = None, *, require_detail: bool = False
+    ) -> SummaryData:
         request_date = target_date or local_today(self.timezone)
         statistic_body = await self._request_with_reauth(
             "GET",
@@ -443,6 +449,8 @@ class KalorickeTabulkyClient:
             )
             detail_data = detail_body.get("data") or {}
         except KalorickeTabulkyError:
+            if require_detail:
+                raise
             detail_data = {}
         _add_detail_fallback_metrics(detail_data, metrics)
 
@@ -457,6 +465,52 @@ class KalorickeTabulkyClient:
             "GET", DIARY_DETAIL_URL.format(date=self._format_date(target_date))
         )
         return {"date": target_date.isoformat(), "data": body.get("data") or {}}
+
+    async def get_diary_range(self, date_from: date, date_to: date) -> dict[str, Any]:
+        from .models import DiaryRangeRequest
+        from .trends import range_day, range_summary
+
+        request = DiaryRangeRequest(account=self.alias, date_from=date_from, date_to=date_to)
+        dates = [request.date_from + timedelta(days=i)
+                 for i in range((request.date_to - request.date_from).days + 1)]
+
+        async def read_day(day: date) -> dict[str, Any]:
+            async with self.work_semaphore:
+                return range_day(day, await self.get_summary(day, require_detail=True))
+
+        tasks = [asyncio.create_task(read_day(day)) for day in dates]
+        try:
+            days = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                "days": days, "summary": range_summary(days)}
+
+    async def get_diary_entries(self, target_date: date) -> dict[str, Any]:
+        try:
+            return {"date": target_date.isoformat(), **compact_diary(await self.get_diary_detail(target_date))}
+        except (ValueError, TypeError) as err:
+            raise KalorickeTabulkyError(f"Cannot safely normalize diary entries: {err}") from err
+
+    async def delete_diary_entry(
+        self, target_date: date, entry_guid: str, *, commit: bool = False,
+    ) -> dict[str, Any]:
+        # Keep real deletion disabled until an authenticated browser capture
+        # establishes its endpoint, method and payload. Do not guess a URL.
+        async with self.diary_write_lock:
+            diary = await self.get_diary_entries(target_date)
+            entry = next((item for item in diary["entries"] if item["entry_guid"] == entry_guid), None)
+            if entry is None:
+                raise KalorickeTabulkyError("Diary entry does not exist on the requested date")
+            reason = "Deletion endpoint/method/payload require verification from the KT web application"
+            if commit:
+                raise KalorickeTabulkyError(reason + "; no deletion was performed")
+            return {"date": target_date.isoformat(), "mode": "preview", "entry": entry,
+                    "commit_required_for_write": True, "write_supported": False,
+                    "blocked_write_reason": reason}
 
     async def record_weight(self, weight: float, target_date: date) -> dict[str, Any]:
         return await self._request_with_reauth(

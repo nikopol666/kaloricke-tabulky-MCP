@@ -16,6 +16,9 @@ from .clock import local_today
 from .models import (
     CreateCustomRecipeRequest,
     DiarySummaryRequest,
+    DiaryRangeRequest,
+    DiaryEntriesRequest,
+    DeleteDiaryEntryRequest,
     ListCustomRecipesRequest,
     PrepareRecipeImportRequest,
     RecordFoodBatchRequest,
@@ -634,6 +637,50 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             return _error(err)
 
     @mcp.tool()
+    async def get_diary_range(account: str, date_from: str, date_to: str) -> dict[str, Any]:
+        """Read daily nutrition trends; requires account and YYYY-MM-DD date_from/date_to.
+
+        Both dates are inclusive, with a maximum of 92 days. Empty days are
+        excluded from averages; unavailable metrics remain null. Never writes.
+        """
+        try:
+            request = DiaryRangeRequest(account=account, date_from=date_from, date_to=date_to)
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.get_diary_range(request.date_from, request.date_to)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
+    async def get_diary_entries(account: str, date: str | None = None) -> dict[str, Any]:
+        """Read compact entries grouped by meal, with meal/day nutrient totals.
+
+        Requires account. date is YYYY-MM-DD and defaults to the local date.
+        Missing nutrient totals remain null. Never writes. The draft payload
+        adapter still needs verification against an anonymized live KT fixture.
+        """
+        try:
+            request = DiaryEntriesRequest(account=account, date=date or local_today(registry.settings.timezone))
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.get_diary_entries(request.date)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
+    async def delete_diary_entry(account: str, date: str, entry_guid: str, commit: bool = False) -> dict[str, Any]:
+        """Preview deletion of an existing entry; requires account, YYYY-MM-DD date and entry_guid.
+
+        Checks membership in the requested day and previews title/amount/meal.
+        Deletion normally requires commit=true, but actual deletion is currently
+        blocked pending a verified KT endpoint, HTTP method and request payload.
+        """
+        try:
+            request = DeleteDiaryEntryRequest(account=account, date=date, entry_guid=entry_guid, commit=commit)
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.delete_diary_entry(request.date, request.entry_guid, commit=request.commit)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
     async def get_diary_summary(account: str | None = None, date: str | None = None) -> dict[str, Any]:
         """Return safe daily diary summary metrics."""
         try:
@@ -648,7 +695,10 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
 
     @mcp.tool()
     async def get_diary_detail(account: str | None = None, date: str | None = None) -> dict[str, Any]:
-        """Return the raw daily diary detail payload for diagnostics."""
+        """Return raw daily diary JSON for diagnostics; this can be expensive in tokens.
+
+        Prefer get_diary_entries for a compact view. date uses YYYY-MM-DD.
+        """
         try:
             request = DiarySummaryRequest(
                 account=account, date=date or local_today(registry.settings.timezone)
