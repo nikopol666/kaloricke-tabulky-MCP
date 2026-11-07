@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import md5
@@ -9,10 +10,14 @@ from html import unescape
 from http.cookies import SimpleCookie
 from math import isfinite
 import re
+import unicodedata
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, FormData
+
+from .clock import local_now, local_today
+from .diary import duplicate_entries, find_duplicate, resolved_entry
 
 LOGIN_PAGE_URL = "https://www.kaloricketabulky.cz/login"
 LOGIN_URL = "https://www.kaloricketabulky.cz/login/create?format=json"
@@ -215,6 +220,22 @@ class KalorickeTabulkyError(Exception):
     """Base error for Kaloricke Tabulky API failures."""
 
 
+class AmbiguousFoodError(KalorickeTabulkyError):
+    """A caller must select a GUID or explicitly opt into fuzzy selection."""
+
+    def __init__(self, candidates: list[dict[str, Any]]) -> None:
+        super().__init__(
+            "Ambiguous food query; select food_guid or set allow_fuzzy=true"
+        )
+        self.candidates = [
+            {
+                key: item.get(key)
+                for key in ("food_guid", "title", "brand_name", "energy", "unit")
+            }
+            for item in candidates[:5]
+        ]
+
+
 class InvalidAuthError(KalorickeTabulkyError):
     """Raised when credentials are rejected."""
 
@@ -298,8 +319,11 @@ class KalorickeTabulkyClient:
         *,
         request_timeout: int = 30,
         session: ClientSession | None = None,
+        timezone: str | None = None,
     ) -> None:
         self._credentials = credentials
+        self.timezone = timezone
+        self.diary_write_lock = asyncio.Lock()
         self._owns_session = session is None
         self._session = session or ClientSession(timeout=ClientTimeout(total=request_timeout))
         self._cookies: str | None = None
@@ -393,7 +417,7 @@ class KalorickeTabulkyClient:
         return {"account": self.alias, "status": "ok"}
 
     async def get_summary(self, target_date: date | None = None) -> SummaryData:
-        request_date = target_date or date.today()
+        request_date = target_date or local_today(self.timezone)
         statistic_body = await self._request_with_reauth(
             "GET",
             SUMMARY_URL.format(date=self._format_date(request_date)),
@@ -466,18 +490,14 @@ class KalorickeTabulkyClient:
         target_date: date,
         target_time: str | None = None,
         meal_type: str | None = None,
+        allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
         search_result: dict[str, Any] | None = None
         if food_guid is None:
             if not query:
                 raise KalorickeTabulkyError("Set query or food_guid")
-            results = await self.search_food(query, kind, limit=10)
-            search_result = next(
-                (item for item in results if item.get("class") == "foodstuff"),
-                next((item for item in results if item.get("food_guid")), None),
-            )
-            if search_result is None:
-                raise KalorickeTabulkyError(f"No food result found for query: {query}")
+            results = await self.search_food(query, kind)
+            search_result = _select_food(results, query, allow_fuzzy=allow_fuzzy)
             food_guid = str(search_result["food_guid"])
 
         form_body = await self._request_with_reauth(
@@ -492,7 +512,9 @@ class KalorickeTabulkyClient:
         if target_time is not None:
             payload["timeUser"] = True
             payload["time"] = target_time
-        payload["diaryTimeGuid"] = _meal_type_id(meal_type) or _meal_type_from_time(target_time)
+        payload["diaryTimeGuid"] = _meal_type_id(meal_type) or _meal_type_from_time(
+            target_time, self.timezone
+        )
         _apply_unit_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
         return {
             "food_guid": food_guid,
@@ -500,25 +522,38 @@ class KalorickeTabulkyClient:
             "date": payload.get("date"),
             "time": payload.get("time"),
             "meal_type": payload.get("diaryTimeGuid"),
+            "meal_type_source": (
+                "explicit" if meal_type else "time" if target_time else "now"
+            ),
             "unit_guid": payload.get("unitGuid"),
             "multiplier": payload.get("multiplier"),
             "payload": payload,
             "search_result": search_result,
         }
 
-    async def record_resolved_food(self, resolved: dict[str, Any]) -> dict[str, Any]:
-        response = await self._request_with_reauth("POST", RECORD_FOOD_URL, json=resolved["payload"])
-        return {
-            "message": response.get("message"),
-            "food_guid": resolved.get("food_guid"),
-            "title": resolved.get("title"),
-            "date": resolved.get("date"),
-            "time": resolved.get("time"),
-            "meal_type": resolved.get("meal_type"),
-            "unit_guid": resolved.get("unit_guid"),
-            "multiplier": resolved.get("multiplier"),
-            "search_result": resolved.get("search_result"),
-        }
+    async def record_resolved_food(
+        self,
+        resolved: dict[str, Any],
+        *,
+        allow_duplicates: bool = False,
+        diary_entries: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if diary_entries is not None:
+            # Batch callers hold diary_write_lock and share one fresh snapshot.
+            return await self._record_diary_item(
+                resolved, RECORD_FOOD_URL, diary_entries, allow_duplicates
+            )
+        async with self.diary_write_lock:
+            entries = (
+                []
+                if allow_duplicates
+                else await self.get_duplicate_entries(
+                    parse_public_date(resolved["date"])
+                )
+            )
+            return await self._record_diary_item(
+                resolved, RECORD_FOOD_URL, entries, allow_duplicates
+            )
 
     async def resolve_recipe_serving(
         self,
@@ -531,15 +566,21 @@ class KalorickeTabulkyClient:
         target_date: date,
         target_time: str | None = None,
         meal_type: str | None = None,
+        allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
         recipe_lookup: dict[str, Any] | None = None
         if recipe_guid is None:
             if not query:
                 raise KalorickeTabulkyError("Set query or recipe_guid")
-            recipes = await self.list_custom_recipes(query=query, limit=10)
-            recipe_lookup = next(iter(recipes.get("recipes", [])), None)
-            if not recipe_lookup:
-                raise KalorickeTabulkyError(f"No custom recipe found for query: {query}")
+            recipes = await self.list_custom_recipes(query=query, limit=100)
+            recipe_lookup = _select_food(
+                [
+                    {**item, "food_guid": item.get("recipe_guid")}
+                    for item in recipes.get("recipes", [])
+                ],
+                query,
+                allow_fuzzy=allow_fuzzy,
+            )
             recipe_guid = str(recipe_lookup["recipe_guid"])
 
         form_body = await self._request_with_reauth(
@@ -554,7 +595,9 @@ class KalorickeTabulkyClient:
         if target_time is not None:
             payload["timeUser"] = True
             payload["time"] = target_time
-        payload["diaryTimeGuid"] = _meal_type_id(meal_type) or _meal_type_from_time(target_time)
+        payload["diaryTimeGuid"] = _meal_type_id(meal_type) or _meal_type_from_time(
+            target_time, self.timezone
+        )
         _apply_recipe_serving_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
         return {
             "food_guid": recipe_guid,
@@ -562,29 +605,100 @@ class KalorickeTabulkyClient:
             "date": payload.get("date"),
             "time": payload.get("time"),
             "meal_type": payload.get("diaryTimeGuid"),
+            "meal_type_source": (
+                "explicit" if meal_type else "time" if target_time else "now"
+            ),
             "unit_guid": payload.get("selectedUnitGuid"),
             "multiplier": payload.get("selectedUnitMultiplier"),
             "payload": payload,
             "search_result": recipe_lookup,
         }
 
-    async def record_resolved_recipe(self, resolved: dict[str, Any]) -> dict[str, Any]:
+    async def record_resolved_recipe(
+        self,
+        resolved: dict[str, Any],
+        *,
+        allow_duplicates: bool = False,
+        diary_entries: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        if diary_entries is not None:
+            # Batch callers hold diary_write_lock and share one fresh snapshot.
+            return await self._record_diary_item(
+                resolved, RECORD_RECIPE_URL, diary_entries, allow_duplicates
+            )
+        async with self.diary_write_lock:
+            entries = (
+                []
+                if allow_duplicates
+                else await self.get_duplicate_entries(
+                    parse_public_date(resolved["date"])
+                )
+            )
+            return await self._record_diary_item(
+                resolved, RECORD_RECIPE_URL, entries, allow_duplicates
+            )
+
+    async def get_duplicate_entries(self, target_date: date) -> list[dict[str, Any]]:
+        try:
+            return duplicate_entries(await self.get_diary_detail(target_date))
+        except (ValueError, TypeError) as err:
+            raise KalorickeTabulkyError(
+                f"Cannot safely check diary duplicates: {err}"
+            ) from err
+
+    async def _record_diary_item(
+        self,
+        resolved: dict[str, Any],
+        endpoint: str,
+        entries: list[dict[str, Any]],
+        allow_duplicates: bool,
+    ) -> dict[str, Any]:
+        if not allow_duplicates:
+            try:
+                duplicate = find_duplicate(resolved, entries)
+            except (ValueError, TypeError) as err:
+                raise KalorickeTabulkyError(
+                    f"Cannot safely check diary duplicates: {err}"
+                ) from err
+            if duplicate is not None:
+                return {
+                    "status": "skipped_duplicate",
+                    "existing_record": dict(duplicate),
+                }
         response = await self._request_with_reauth(
-            "POST",
-            RECORD_RECIPE_URL,
-            json=resolved["payload"],
+            "POST", endpoint, json=resolved["payload"],
             headers={"Accept": "application/json, text/plain, */*"},
         )
+        data = response.get("data")
+        entry_guid = None
+        if isinstance(data, dict):
+            entry_guid = data.get("entryGuid") or data.get("guid") or data.get("id")
+        if not allow_duplicates:
+            entry = resolved_entry(
+                resolved, str(entry_guid) if entry_guid is not None else None
+            )
+            # Zero-based successful-write index, independent of existing rows.
+            # This also supplies a reference if the API omits the new entry ID.
+            entry["written_in_request"] = True
+            entry["write_index"] = sum(bool(item.get("written_in_request")) for item in entries)
+            entries.append(entry)
         return {
             "message": response.get("message"),
-            "food_guid": resolved.get("food_guid"),
-            "title": resolved.get("title"),
-            "date": resolved.get("date"),
-            "time": resolved.get("time"),
-            "meal_type": resolved.get("meal_type"),
-            "unit_guid": resolved.get("unit_guid"),
-            "multiplier": resolved.get("multiplier"),
-            "search_result": resolved.get("search_result"),
+            **{
+                key: resolved.get(key)
+                for key in (
+                    "food_guid",
+                    "title",
+                    "date",
+                    "time",
+                    "meal_type",
+                    "meal_type_source",
+                    "unit_guid",
+                    "multiplier",
+                    "search_result",
+                )
+            },
+            "entry_guid": entry_guid,
         }
 
     def build_custom_recipe_payload(
@@ -851,7 +965,7 @@ def parse_public_date(value: str | date | None) -> date:
     if isinstance(value, date):
         return value
     if not value:
-        return date.today()
+        return local_today()
     for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
         try:
             return datetime.strptime(value, fmt).date()
@@ -1133,6 +1247,40 @@ def _search_kind(value: str) -> str:
         raise KalorickeTabulkyError("kind must be food or drink") from err
 
 
+def _normalized_title(value: str) -> str:
+    text = unicodedata.normalize("NFKD", unescape(value).casefold())
+    return " ".join("".join(c for c in text if not unicodedata.combining(c)).split())
+
+
+def _select_food(
+    results: list[dict[str, Any]],
+    query: str,
+    *,
+    allow_fuzzy: bool,
+) -> dict[str, Any]:
+    candidates = [item for item in results if item.get("food_guid")]
+    # Keep actual food results when the endpoint also returns navigation suggestions.
+    foods = [item for item in candidates if item.get("class") == "foodstuff"]
+    if foods:
+        candidates = foods
+    candidates = list({str(item["food_guid"]): item for item in candidates}.values())
+    if not candidates:
+        raise KalorickeTabulkyError(f"No food result found for query: {query}")
+    needle = _normalized_title(query)
+
+    def score(item: dict[str, Any]) -> tuple[bool, bool, bool]:
+        title = _normalized_title(str(item.get("title") or ""))
+        favorite = item.get("favorite") in (True, 1, "1", "true")
+        return title == needle, favorite, title.startswith(needle)
+
+    candidates.sort(key=score, reverse=True)
+    best = score(candidates[0])
+    ambiguous = len(candidates) > 1 and (not best[0] or score(candidates[1]) == best)
+    if ambiguous and not allow_fuzzy:
+        raise AmbiguousFoodError(candidates)
+    return candidates[0]
+
+
 def _normalize_search_result(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "food_guid": item.get("id"),
@@ -1174,9 +1322,9 @@ def _meal_type_id(value: str | None) -> str | None:
     )
 
 
-def _meal_type_from_time(value: str | None) -> str:
+def _meal_type_from_time(value: str | None, timezone: str | None = None) -> str:
     if value is None:
-        return "1"
+        value = local_now(timezone).strftime("%H:%M")
     hour, minute = (int(part) for part in value.split(":"))
     minutes = hour * 60 + minute
     if 5 * 60 <= minutes < 10 * 60:

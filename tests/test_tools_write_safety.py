@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +26,7 @@ class FakeClient:
     alias = "personal"
 
     def __init__(self) -> None:
+        self.diary_write_lock = asyncio.Lock()
         self.write_calls = 0
         self.recipe_write_calls = 0
         self.image_write_calls = 0
@@ -51,7 +54,7 @@ class FakeClient:
             },
         }
 
-    async def record_resolved_food(self, resolved):
+    async def record_resolved_food(self, resolved, **kwargs):
         self.write_calls += 1
         return {"message": "ok", "food_guid": resolved["food_guid"]}
 
@@ -72,7 +75,7 @@ class FakeClient:
             },
         }
 
-    async def record_resolved_recipe(self, resolved):
+    async def record_resolved_recipe(self, resolved, **kwargs):
         self.write_calls += 1
         return {"message": "ok", "food_guid": resolved["food_guid"]}
 
@@ -133,6 +136,7 @@ class FakeClient:
 
 class FakeRegistry:
     def __init__(self) -> None:
+        self.settings = SimpleNamespace(timezone="Europe/Prague")
         self.client = FakeClient()
 
     def safe_health(self):

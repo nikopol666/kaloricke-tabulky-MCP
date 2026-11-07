@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
+from zoneinfo import ZoneInfoNotFoundError
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .client import AccountCredentials
+from .clock import timezone_info
 
 
 class ConfigError(ValueError):
@@ -29,6 +31,7 @@ class Settings:
     request_timeout: int
     max_retries: int
     log_level: str
+    timezone: str = "Europe/Prague"
 
 
 class RawSettings(BaseSettings):
@@ -36,6 +39,7 @@ class RawSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    kt_timezone: str = "Europe/Prague"
     kt_accounts: str = Field(default="", description="Comma-separated account aliases")
     kt_default_account: str | None = Field(default=None)
     mcp_server_name: str = Field(default="Kaloricke Tabulky MCP")
@@ -53,9 +57,12 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if env is not None:
         raw = RawSettings.model_validate(
             {
+                "kt_timezone": source.get("KT_TIMEZONE", "Europe/Prague"),
                 "kt_accounts": source.get("KT_ACCOUNTS", ""),
                 "kt_default_account": source.get("KT_DEFAULT_ACCOUNT"),
-                "mcp_server_name": source.get("MCP_SERVER_NAME", "Kaloricke Tabulky MCP"),
+                "mcp_server_name": source.get(
+                    "MCP_SERVER_NAME", "Kaloricke Tabulky MCP"
+                ),
                 "mcp_host": source.get("MCP_HOST", "0.0.0.0"),
                 "mcp_port": int(source.get("MCP_PORT", "8080")),
                 "mcp_bearer_token": source.get("MCP_BEARER_TOKEN"),
@@ -64,11 +71,16 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
                 "log_level": source.get("LOG_LEVEL", "INFO"),
             }
         )
+    try:
+        timezone_info(raw.kt_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as err:
+        raise ConfigError("KT_TIMEZONE must be a valid IANA timezone") from err
     accounts = _parse_accounts(source, raw.kt_accounts)
     default_account = _normalize_alias(raw.kt_default_account) if raw.kt_default_account else None
     if default_account and default_account not in accounts:
         raise ConfigError("KT_DEFAULT_ACCOUNT must match one configured account alias")
     return Settings(
+        timezone=raw.kt_timezone,
         accounts=accounts,
         default_account=default_account,
         mcp_server_name=raw.mcp_server_name,

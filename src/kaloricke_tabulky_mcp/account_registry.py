@@ -94,8 +94,9 @@ class AccountRegistry:
             return existing
         credentials = self._settings.accounts[alias]
         client = KalorickeTabulkyClient(
-            credentials, request_timeout=self._settings.request_timeout
+            credentials,
+            request_timeout=self._settings.request_timeout,
+            timezone=self._settings.timezone,
         )
         self._clients[alias] = client
         return client
-

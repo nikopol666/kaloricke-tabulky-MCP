@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .clock import local_today
+
 FoodKind = Literal["food", "drink"]
 
 
@@ -16,7 +18,7 @@ def parse_date(value: str | Date | None) -> Date:
     if isinstance(value, Date):
         return value
     if value is None or value == "":
-        return Date.today()
+        return local_today()
     for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
         try:
             return datetime.strptime(value, fmt).date()
@@ -65,7 +67,7 @@ class ListCustomRecipesRequest(StrictModel):
 
 class RecordFoodRequest(StrictModel):
     account: str = Field(min_length=1)
-    date: Date = Field(default_factory=Date.today)
+    date: Date = Field(default_factory=local_today)
     meal_type: str | None = None
     time: str | None = None
     kind: FoodKind = "food"
@@ -74,6 +76,8 @@ class RecordFoodRequest(StrictModel):
     amount: float | None = None
     unit: str | None = None
     unit_guid: str | None = None
+    allow_fuzzy: bool = False
+    allow_duplicates: bool = False
     commit: bool = False
 
     @field_validator("date", mode="before")
@@ -111,6 +115,7 @@ class BatchFoodItem(StrictModel):
     source: str | None = None
     source_id: str | None = None
     note: str | None = None
+    allow_fuzzy: bool = False
 
     @field_validator("time", mode="before")
     @classmethod
@@ -139,10 +144,12 @@ class BatchFoodItem(StrictModel):
 
 class RecordFoodBatchRequest(StrictModel):
     account: str = Field(min_length=1)
-    date: Date = Field(default_factory=Date.today)
+    date: Date = Field(default_factory=local_today)
     items: list[BatchFoodItem] = Field(min_length=1, max_length=100)
     default_meal_type: str | None = None
     default_time: str | None = None
+    allow_fuzzy: bool = False
+    allow_duplicates: bool = False
     commit: bool = False
     continue_on_error: bool = True
 
@@ -171,6 +178,7 @@ class RecipeIngredientItem(BatchFoodItem):
 
 
 class PrepareRecipeImportRequest(StrictModel):
+    allow_fuzzy: bool = False
     account: str = Field(min_length=1)
     title: str = Field(min_length=1, max_length=200)
     ingredients: list[RecipeIngredientItem] = Field(min_length=1, max_length=100)
@@ -249,7 +257,7 @@ class UploadCustomRecipeImageRequest(StrictModel):
 
 class RecordRecipeServingRequest(StrictModel):
     account: str = Field(min_length=1)
-    date: Date = Field(default_factory=Date.today)
+    date: Date = Field(default_factory=local_today)
     meal_type: str | None = None
     time: str | None = None
     query: str | None = None
@@ -258,6 +266,8 @@ class RecordRecipeServingRequest(StrictModel):
     amount: float | None = None
     unit: str | None = None
     unit_guid: str | None = None
+    allow_fuzzy: bool = False
+    allow_duplicates: bool = False
     commit: bool = False
 
     @field_validator("date", mode="before")
@@ -284,7 +294,7 @@ class RecordRecipeServingRequest(StrictModel):
 
 class DiarySummaryRequest(StrictModel):
     account: str | None = None
-    date: Date = Field(default_factory=Date.today)
+    date: Date = Field(default_factory=local_today)
 
     @field_validator("date", mode="before")
     @classmethod
@@ -294,7 +304,7 @@ class DiarySummaryRequest(StrictModel):
 
 class RecordWeightRequest(StrictModel):
     account: str = Field(min_length=1)
-    date: Date = Field(default_factory=Date.today)
+    date: Date = Field(default_factory=local_today)
     weight_kg: float
     commit: bool = False
 

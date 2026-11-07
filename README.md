@@ -43,6 +43,7 @@ KT_ACCOUNT_PARTNER_EMAIL=partner@example.com
 KT_ACCOUNT_PARTNER_PASSWORD=replace-me
 # KT_ACCOUNT_PARTNER_PASSWORD_MD5=32-character-browser-md5
 KT_DEFAULT_ACCOUNT=personal
+KT_TIMEZONE=Europe/Prague
 MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
@@ -50,6 +51,60 @@ MCP_HTTP_PORT=8080
 Aliases are normalized to lowercase underscores. Collisions such as `my-account` and `my_account` are rejected.
 `KT_ACCOUNT_<ALIAS>_PASSWORD_MD5` is optional and takes precedence over plaintext password when set. Treat it as password-equivalent secret material.
 When `MCP_BEARER_TOKEN` is set, MCP clients must send `Authorization: Bearer <token>` to `/mcp`. `/health` stays unauthenticated for container healthchecks.
+
+`KT_TIMEZONE` is an IANA timezone (default `Europe/Prague`). Invalid names stop
+startup with a configuration error. Omitted dates use the current date in this
+timezone, including around midnight and daylight saving transitions. Explicit
+dates accept `YYYY-MM-DD` or `DD.MM.YYYY`. Python's `zoneinfo` uses system timezone
+data, with the `tzdata` dependency as a fallback for slim images.
+
+### Diary write defaults and safeguards (0.2.0)
+
+`record_food`, `record_food_batch` and `record_recipe_serving` retain preview as
+the default; writes require an explicit `account` and `commit=true`.
+
+- `meal_type` accepts `breakfast`, `morning_snack`, `lunch`, `afternoon_snack`,
+  `dinner`, `second_dinner`, or IDs `1`–`6`. It takes precedence over `time`.
+  With no explicit meal, `time` (`HH:MM`) selects the meal; with neither, the
+  current time in `KT_TIMEZONE` selects it. Preview includes `meal_type_source`:
+  `explicit`, `time`, or `now`. Batch item values take precedence over batch
+  defaults. Meal boundaries are 05:00, 10:00, 11:30, 14:30, 17:30 and 21:30;
+  times before 05:00 use `second_dinner`.
+- Search candidates are ranked by exact normalized title (case/diacritics and
+  whitespace ignored), then favorite, then title starting with the query.
+  Multiple candidates without an exact match are always ambiguous, including
+  when one is a favorite. Tied exact matches are also ambiguous unless the
+  ranking distinguishes them. Responses include `ambiguous: true` and up to
+  five ranked `candidates` with `food_guid`, `title`, `brand_name`, `energy` and
+  `unit`. A preview reports `status: "ambiguous"`; a commit reports an error and
+  makes no write. Select a candidate with `food_guid` (or `recipe_guid` for a
+  recipe), or explicitly opt into the highest ranked result with
+  `allow_fuzzy=true`. The override also works on batches, recipe import/create
+  requests, and individual ingredients/items. An ambiguous batch item prevents
+  the entire batch from writing.
+- Before committing, read the target day's diary and compare food/recipe GUID,
+  meal, selected unit GUID and numeric unit quantity. A match returns
+  `status: "skipped_duplicate"` with `existing_record`, including `entry_guid`;
+  it does not make a write request. Different units are not converted or assumed
+  equivalent. Use `allow_duplicates=true` to intentionally repeat a portion and
+  bypass the diary lookup. Preview performs no duplicate lookup.
+- A batch reads the diary once per commit attempt and adds each successful
+  write to that snapshot, so repeated items within the same batch are also
+  skipped. Commit results include `written_count` and `skipped_duplicate_count`;
+  `success_count` includes both written and skipped items. If KT omits the new
+  entry ID, a later duplicate in the same batch references `written_in_request`
+  and `write_index` instead. Calls sharing a client serialize diary writes.
+  Independent server instances/external clients can still race: this is a
+  read-before-write guard, not server-side transactional idempotency.
+
+Duplicate normalization currently supports explicit `foodstuff`/`entries`
+collections, optionally grouped under `meals`/`items`, with food identity, entry
+identity, meal, selected unit and quantity fields (see `diary.py`). Unknown or
+incomplete structures and diary read failures **block writes** when the guard
+is enabled. The mappings are covered by synthetic fixtures and a local fake KT
+HTTP server; they have not yet been checked against an anonymized live diary
+payload. Live verification on a test account is still required before relying
+on this integration. No real KT requests are made by the tests.
 
 ## Tools
 

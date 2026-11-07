@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import date
 import logging
 from typing import Any
 
@@ -12,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
 from .account_registry import AccountRegistry
-from .client import KalorickeTabulkyError
+from .client import AmbiguousFoodError, KalorickeTabulkyError
+from .clock import local_today
 from .models import (
     CreateCustomRecipeRequest,
     DiarySummaryRequest,
@@ -103,7 +103,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
     @mcp.tool()
     async def record_food(
         account: str,
-        date: str,
+        date: str | None = None,
         meal_type: str | None = None,
         time: str | None = None,
         kind: str = "food",
@@ -113,12 +113,14 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         unit: str | None = None,
         unit_guid: str | None = None,
         commit: bool = False,
+        allow_fuzzy: bool = False,
+        allow_duplicates: bool = False,
     ) -> dict[str, Any]:
         """Preview or record a single food/drink item. Writes only with commit=true."""
         try:
             request = RecordFoodRequest(
                 account=account,
-                date=date,
+                date=date or local_today(registry.settings.timezone),
                 meal_type=meal_type,
                 time=time,
                 kind=kind,
@@ -128,6 +130,8 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 unit=unit,
                 unit_guid=unit_guid,
                 commit=commit,
+                allow_fuzzy=allow_fuzzy,
+                allow_duplicates=allow_duplicates,
             )
             client = registry.get_write_client(request.account)
             resolved = await client.resolve_food(
@@ -140,12 +144,22 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 target_date=request.date,
                 target_time=request.time,
                 meal_type=request.meal_type,
+                allow_fuzzy=request.allow_fuzzy,
             )
             preview = _preview(client.alias, resolved, request.commit)
             if not request.commit:
                 return preview
-            written = await client.record_resolved_food(resolved)
-            return {**preview, "status": "written", "written_record": written}
+            written = await client.record_resolved_food(
+                resolved, allow_duplicates=request.allow_duplicates
+            )
+            return _write_result(preview, written)
+        except AmbiguousFoodError as err:
+            return {
+                **_error(err),
+                "status": "error" if commit else "ambiguous",
+                "account": account,
+                "mode": "commit" if commit else "preview",
+            }
         except (ValidationError, ValueError, KalorickeTabulkyError) as err:
             return _error(err)
 
@@ -158,16 +172,20 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         default_time: str | None = None,
         commit: bool = False,
         continue_on_error: bool = True,
+        allow_fuzzy: bool = False,
+        allow_duplicates: bool = False,
     ) -> dict[str, Any]:
         """Preview or record normalized food items from assistant/Mealie workflows."""
         try:
             request = RecordFoodBatchRequest(
                 account=account,
-                date=date,
+                date=date or local_today(registry.settings.timezone),
                 items=items,
                 default_meal_type=default_meal_type,
                 default_time=default_time,
                 commit=commit,
+                allow_fuzzy=allow_fuzzy,
+                allow_duplicates=allow_duplicates,
                 continue_on_error=continue_on_error,
             )
             client = registry.get_write_client(request.account)
@@ -190,6 +208,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     target_date=request.date,
                     target_time=item.time or request.default_time,
                     meal_type=item.meal_type or request.default_meal_type,
+                    allow_fuzzy=item.allow_fuzzy or request.allow_fuzzy,
                 )
                 resolved_items.append(resolved)
                 results.append(
@@ -204,7 +223,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 success_count += 1
             except KalorickeTabulkyError as err:
                 failure_count += 1
-                results.append({"index": index, "status": "error", "error": str(err)})
+                results.append({"index": index, **_error(err)})
                 if not request.continue_on_error:
                     break
 
@@ -220,25 +239,46 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
 
         written_results: list[dict[str, Any]] = []
         write_failures = 0
-        for index, resolved in enumerate(resolved_items):
+        async with client.diary_write_lock:
             try:
-                written_results.append(
-                    {
-                        "index": index,
-                        "status": "written",
-                        "written_record": await client.record_resolved_food(resolved),
-                    }
+                entries = (
+                    []
+                    if request.allow_duplicates
+                    else await client.get_duplicate_entries(request.date)
                 )
             except KalorickeTabulkyError as err:
-                write_failures += 1
-                written_results.append({"index": index, "status": "error", "error": str(err)})
-                if not request.continue_on_error:
-                    break
+                return {"account": client.alias, "mode": "commit", **_error(err)}
+            for index, resolved in enumerate(resolved_items):
+                try:
+                    written_results.append(
+                        {
+                            "index": index,
+                            **_write_result(
+                                {},
+                                await client.record_resolved_food(
+                                    resolved,
+                                    allow_duplicates=request.allow_duplicates,
+                                    diary_entries=entries,
+                                ),
+                            ),
+                        }
+                    )
+                except KalorickeTabulkyError as err:
+                    write_failures += 1
+                    written_results.append({"index": index, **_error(err)})
+                    if not request.continue_on_error:
+                        break
         return {
             "account": client.alias,
             "mode": "commit",
             "success_count": len(written_results) - write_failures,
             "failure_count": write_failures,
+            "written_count": sum(
+                item["status"] == "written" for item in written_results
+            ),
+            "skipped_duplicate_count": sum(
+                item["status"] == "skipped_duplicate" for item in written_results
+            ),
             "results": written_results,
         }
 
@@ -252,6 +292,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         source: str | None = None,
         source_id: str | None = None,
         continue_on_error: bool = True,
+        allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
         """Resolve recipe ingredients for KT custom recipe creation preview."""
         try:
@@ -264,6 +305,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 source=source,
                 source_id=source_id,
                 continue_on_error=continue_on_error,
+                allow_fuzzy=allow_fuzzy,
             )
             client = registry.get_write_client(request.account)
         except (ValidationError, ValueError) as err:
@@ -282,7 +324,8 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     amount=ingredient.amount,
                     unit=ingredient.unit,
                     unit_guid=ingredient.unit_guid,
-                    target_date=date.today(),
+                    target_date=local_today(registry.settings.timezone),
+                    allow_fuzzy=ingredient.allow_fuzzy or request.allow_fuzzy,
                 )
                 preview = _recipe_ingredient_preview(index, ingredient, resolved)
                 results.append(preview)
@@ -296,7 +339,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                         "status": "error",
                         "source": ingredient.source,
                         "source_id": ingredient.source_id,
-                        "error": str(err),
+                        **_error(err),
                     }
                 )
                 if not request.continue_on_error:
@@ -340,6 +383,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         include_payload: bool = False,
         commit: bool = False,
         continue_on_error: bool = True,
+        allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
         """Preview or create a real KT custom recipe from resolved ingredients.
 
@@ -362,6 +406,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 include_payload=include_payload,
                 commit=commit,
                 continue_on_error=continue_on_error,
+                allow_fuzzy=allow_fuzzy,
             )
             client = registry.get_write_client(request.account)
         except (ValidationError, ValueError) as err:
@@ -380,7 +425,8 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     amount=ingredient.amount,
                     unit=ingredient.unit,
                     unit_guid=ingredient.unit_guid,
-                    target_date=date.today(),
+                    target_date=local_today(registry.settings.timezone),
+                    allow_fuzzy=ingredient.allow_fuzzy or request.allow_fuzzy,
                 )
                 preview = _recipe_ingredient_preview(index, ingredient, resolved)
                 results.append(preview)
@@ -394,7 +440,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                         "status": "error",
                         "source": ingredient.source,
                         "source_id": ingredient.source_id,
-                        "error": str(err),
+                        **_error(err),
                     }
                 )
                 if not request.continue_on_error:
@@ -524,7 +570,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
     @mcp.tool()
     async def record_recipe_serving(
         account: str,
-        date: str,
+        date: str | None = None,
         meal_type: str | None = None,
         time: str | None = None,
         query: str | None = None,
@@ -534,6 +580,8 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         unit: str | None = None,
         unit_guid: str | None = None,
         commit: bool = False,
+        allow_fuzzy: bool = False,
+        allow_duplicates: bool = False,
     ) -> dict[str, Any]:
         """Preview or record a serving of a KT custom recipe once it exists.
 
@@ -543,7 +591,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         try:
             request = RecordRecipeServingRequest(
                 account=account,
-                date=date,
+                date=date or local_today(registry.settings.timezone),
                 meal_type=meal_type,
                 time=time,
                 query=query,
@@ -553,6 +601,8 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 unit=unit,
                 unit_guid=unit_guid,
                 commit=commit,
+                allow_fuzzy=allow_fuzzy,
+                allow_duplicates=allow_duplicates,
             )
             client = registry.get_write_client(request.account)
             resolved = await client.resolve_recipe_serving(
@@ -564,12 +614,22 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 target_date=request.date,
                 target_time=request.time,
                 meal_type=request.meal_type,
+                allow_fuzzy=request.allow_fuzzy,
             )
             preview = _preview(client.alias, resolved, request.commit)
             if not request.commit:
                 return preview
-            written = await client.record_resolved_recipe(resolved)
-            return {**preview, "status": "written", "written_record": written}
+            written = await client.record_resolved_recipe(
+                resolved, allow_duplicates=request.allow_duplicates
+            )
+            return _write_result(preview, written)
+        except AmbiguousFoodError as err:
+            return {
+                **_error(err),
+                "status": "error" if commit else "ambiguous",
+                "account": account,
+                "mode": "commit" if commit else "preview",
+            }
         except (ValidationError, ValueError, KalorickeTabulkyError) as err:
             return _error(err)
 
@@ -577,7 +637,9 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
     async def get_diary_summary(account: str | None = None, date: str | None = None) -> dict[str, Any]:
         """Return safe daily diary summary metrics."""
         try:
-            request = DiarySummaryRequest(account=account, date=date)
+            request = DiarySummaryRequest(
+                account=account, date=date or local_today(registry.settings.timezone)
+            )
             client = registry.get_read_client(request.account)
             summary = await client.get_summary(request.date)
             return {"account": client.alias, "date": request.date.isoformat(), **summary.as_safe_dict()}
@@ -588,7 +650,9 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
     async def get_diary_detail(account: str | None = None, date: str | None = None) -> dict[str, Any]:
         """Return the raw daily diary detail payload for diagnostics."""
         try:
-            request = DiarySummaryRequest(account=account, date=date)
+            request = DiarySummaryRequest(
+                account=account, date=date or local_today(registry.settings.timezone)
+            )
             client = registry.get_read_client(request.account)
             detail = await client.get_diary_detail(request.date)
             return {"account": client.alias, **detail}
@@ -605,7 +669,10 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         """Preview or record body weight. Writes only with commit=true."""
         try:
             request = RecordWeightRequest(
-                account=account, weight_kg=weight_kg, date=date, commit=commit
+                account=account,
+                weight_kg=weight_kg,
+                date=date or local_today(registry.settings.timezone),
+                commit=commit,
             )
             client = registry.get_write_client(request.account)
             preview = {
@@ -636,6 +703,7 @@ def _preview(account: str, resolved: dict[str, Any], commit: bool) -> dict[str, 
         "date": resolved.get("date"),
         "time": resolved.get("time"),
         "meal_type": resolved.get("meal_type"),
+        "meal_type_source": resolved.get("meal_type_source"),
         "unit_guid": resolved.get("unit_guid"),
         "multiplier": resolved.get("multiplier"),
         "search_result": resolved.get("search_result"),
@@ -708,4 +776,13 @@ def _decode_base64_image(value: str) -> bytes:
 
 def _error(err: Exception) -> dict[str, Any]:
     logger.warning("Tool call failed: %s", err)
-    return {"status": "error", "error": str(err), "type": err.__class__.__name__}
+    result = {"status": "error", "error": str(err), "type": err.__class__.__name__}
+    if isinstance(err, AmbiguousFoodError):
+        result.update(ambiguous=True, candidates=err.candidates)
+    return result
+
+
+def _write_result(preview: dict[str, Any], written: dict[str, Any]) -> dict[str, Any]:
+    if written.get("status") == "skipped_duplicate":
+        return {**preview, **written}
+    return {**preview, "status": "written", "written_record": written}
