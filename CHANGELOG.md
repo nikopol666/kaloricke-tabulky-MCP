@@ -16,6 +16,9 @@ Phase 1: prevent silent diary data errors.
   for duplicate checks; compare portions by unit label and count or by total
   g/ml, recipe servings by total weight.
 - Require `meal_type` or `time` when the date is not today.
+- Fix unit selection: `amount` without a unit is grams/millilitres (`63` was
+  recorded as 63 x the form's default unit, e.g. 63 x 50 g); count units such as
+  `kus` select their option; unavailable or ambiguous units are errors.
 - Never auto-select a search result without an exact title match, even a single
   one; ambiguous batch items and recipe ingredients report `status: "ambiguous"`
   in preview.

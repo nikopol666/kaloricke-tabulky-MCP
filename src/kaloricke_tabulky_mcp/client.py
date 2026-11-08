@@ -8,7 +8,7 @@ from datetime import date, datetime
 from hashlib import md5
 from html import unescape
 from http.cookies import SimpleCookie
-from math import isfinite
+from math import isclose, isfinite
 import re
 import unicodedata
 from typing import Any
@@ -17,7 +17,7 @@ from urllib.parse import urlencode, urljoin
 from aiohttp import ClientResponse, ClientSession, ClientTimeout, FormData
 
 from .clock import local_now, local_today
-from .diary import duplicate_entries, find_duplicate, resolved_entry
+from .diary import duplicate_entries, find_duplicate, resolved_entry, unit_portion
 
 LOGIN_PAGE_URL = "https://www.kaloricketabulky.cz/login"
 LOGIN_URL = "https://www.kaloricketabulky.cz/login/create?format=json"
@@ -1369,6 +1369,15 @@ def _meal_type_from_time(value: str | None, timezone: str | None = None) -> str:
     return "6"
 
 
+# Units whose amount is a quantity: (dimension, factor to g/ml).
+_QUANTITY_UNITS = {
+    **dict.fromkeys(("g", "gr", "gram", "gramy", "gramu", "gramů"), ("g", 1.0)),
+    **dict.fromkeys(("kg", "kilogram", "kilogramy", "kilogramu", "kilogramů"), ("g", 1000.0)),
+    **dict.fromkeys(("ml", "mililitr", "mililitry", "mililitru", "mililitrů"), ("ml", 1.0)),
+    **dict.fromkeys(("l", "litr", "litry", "litru", "litrů"), ("ml", 1000.0)),
+}
+
+
 def _apply_unit_selection(
     payload: dict[str, Any],
     *,
@@ -1376,12 +1385,21 @@ def _apply_unit_selection(
     unit: str | None,
     unit_guid: str | None,
 ) -> None:
+    """Select the KT unit option and unit count for a foodstuff add form.
+
+    Without ``unit`` (or with g/kg/ml/l) ``amount`` is a quantity in grams or
+    millilitres: an option of exactly that size is used once, otherwise the
+    1 g / 1 ml option ``amount`` times. Any other ``unit`` (``kus``, ``plátek``,
+    ``hrnek``...) names an option and ``amount`` counts it. A unit that the food
+    does not offer is an error instead of silently keeping the form's default.
+    """
     raw_options = payload.get("unitOptions") or []
     options = [
         option
         for option in raw_options
         if isinstance(option, dict) and option.get("id")
     ]
+    food = payload.get("title") or "food"
     if unit_guid:
         if any(str(option.get("id")) == str(unit_guid) for option in options):
             payload["unitGuid"] = unit_guid
@@ -1390,33 +1408,77 @@ def _apply_unit_selection(
                 payload["multiplier"] = amount
             return
         if amount is None:
-            raise KalorickeTabulkyError(
-                f"unit_guid {unit_guid} is not available for {payload.get('title') or 'food'}"
-            )
+            raise KalorickeTabulkyError(f"unit_guid {unit_guid} is not available for {food}")
         _validate_amount(amount)
-        selected = _find_unit_option(options, amount, unit)
-        if selected is None:
+        try:
+            selected, count = _select_unit_option(options, amount, unit, food)
+        except KalorickeTabulkyError as err:
             raise KalorickeTabulkyError(
-                f"unit_guid {unit_guid} is not available for {payload.get('title') or 'food'}"
-            )
+                f"unit_guid {unit_guid} is not available for {food}; {err}"
+            ) from err
         payload["unitGuid"] = selected["id"]
-        payload["multiplier"] = amount
+        payload["multiplier"] = count
         return
     if amount is None:
         return
     _validate_amount(amount)
-    selected = _find_unit_option(options, amount, unit)
-    if selected is None:
+    if not options:
+        # Nothing to choose from; keep the form's own unit.
         payload["multiplier"] = amount
         return
+    selected, count = _select_unit_option(options, amount, unit, food)
     payload["unitGuid"] = selected["id"]
-    selected_multiplier = _parse_localized_number(selected.get("multiplier"))
-    if selected_multiplier is not None and abs(selected_multiplier - amount) < 0.000001:
-        payload["multiplier"] = 1.0
-    elif selected_multiplier == 1:
-        payload["multiplier"] = amount
-    else:
-        payload["multiplier"] = amount
+    payload["multiplier"] = count
+
+
+def _select_unit_option(
+    options: list[dict[str, Any]], amount: float, unit: str | None, food: str
+) -> tuple[dict[str, Any], float]:
+    key = _normalized_title(unit) if unit and unit.strip() else None
+    available = ", ".join(str(option.get("title")) for option in options)
+    quantity_unit = _QUANTITY_UNITS.get(key) if key else None
+    if key is None or quantity_unit is not None:
+        dimensions = {quantity_unit[0]} if quantity_unit else {"g", "ml"}
+        quantity = amount * (quantity_unit[1] if quantity_unit else 1.0)
+        sized = []
+        for option in options:
+            try:
+                portion = unit_portion(str(option.get("title") or ""), 1)
+            except ValueError:
+                continue
+            if portion["dimension"] in dimensions:
+                sized.append((option, portion["quantity"]))
+        for option, size in sized:
+            if isclose(size, quantity, rel_tol=1e-9, abs_tol=1e-9):
+                return option, 1.0
+        for option, size in sized:
+            if size == 1:
+                return option, quantity
+        wanted = unit or "g/ml"
+        raise KalorickeTabulkyError(
+            f"No {wanted} unit for {food}; set unit or unit_guid (available: {available})"
+        )
+    tiers: list[list[dict[str, Any]]] = [[], [], []]
+    for option in options:
+        title = _normalized_title(str(option.get("title") or ""))
+        head = title.split("(")[0].strip()
+        if head == key:
+            tiers[0].append(option)
+        elif head.startswith(key):
+            tiers[1].append(option)
+        elif key in re.findall(r"\w+", title):
+            tiers[2].append(option)
+    for tier in tiers:
+        if len(tier) == 1:
+            return tier[0], amount
+        if tier:
+            titles = ", ".join(str(option.get("title")) for option in tier)
+            raise KalorickeTabulkyError(
+                f"Unit {unit!r} is ambiguous for {food} ({titles}); set unit_guid"
+            )
+    raise KalorickeTabulkyError(
+        f"Unit {unit!r} is not available for {food} (available: {available})"
+    )
 
 
 def _apply_recipe_serving_selection(

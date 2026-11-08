@@ -72,6 +72,14 @@ the default; writes require an explicit `account` and `commit=true`.
   `explicit`, `time`, or `now`. Batch item values take precedence over batch
   defaults. Meal boundaries are 05:00, 10:00, 11:30, 14:30, 17:30 and 21:30;
   times before 05:00 use `second_dinner`.
+- `amount` without `unit` (or with `g`, `kg`, `ml`, `l`) is a quantity in grams
+  or millilitres: a unit option of exactly that size is used once (`42` →
+  `kus (42 g)` x 1), otherwise the `1 g`/`1 ml` option `amount` times (`63` →
+  `1 g` x 63). Any other `unit` names an option and `amount` counts it
+  (`unit: "kus", amount: 1.5` → `kus (42 g)` x 1.5). A unit the food does not
+  offer, or one matching several options, is an error listing the available
+  units; it never falls back to the form's default unit. `unit_guid` selects an
+  option directly and `amount` then counts it.
 - Search candidates are ranked by exact normalized title (case/diacritics and
   whitespace ignored), then favorite, then title starting with the query.
   Without an exact title match the lookup is always ambiguous, even with a

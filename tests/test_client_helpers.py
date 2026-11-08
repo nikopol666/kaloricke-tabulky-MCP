@@ -261,3 +261,70 @@ def test_apply_recipe_serving_selection_scales_portions() -> None:
     assert payload["selectedUnitMultiplier"] == 1
     assert payload["foodstuff"][0]["count"] == 25
     assert payload["foodstuff"][1]["count"] == 5
+
+
+# Unit options as returned by live KT add forms.
+ROLL_UNITS = [
+    {"id": "50g", "title": "50 g", "multiplier": 50},
+    {"id": "piece", "title": "kus (42 g)", "multiplier": 42},
+    {"id": "84g", "title": "84 g", "multiplier": 84},
+    {"id": "100g", "title": "100 g", "multiplier": 100},
+    {"id": "1g", "title": "1 g", "multiplier": 1},
+]
+TEA_UNITS = [
+    {"id": "mug", "title": "hrnek (220 ml)", "multiplier": 220},
+    {"id": "big-mug", "title": "velký hrnek (500 ml)", "multiplier": 500},
+    {"id": "100ml", "title": "100 ml", "multiplier": 100},
+    {"id": "1ml", "title": "1 ml", "multiplier": 1},
+]
+
+
+@pytest.mark.parametrize(
+    "units,amount,unit,expected",
+    [
+        # The form defaults to "50 g"; 63 must not become 63 x 50 g.
+        (ROLL_UNITS, 63, None, ("1g", 63)),
+        (ROLL_UNITS, 50, None, ("50g", 1)),
+        (ROLL_UNITS, 42, None, ("piece", 1)),
+        (ROLL_UNITS, 63, "g", ("1g", 63)),
+        (ROLL_UNITS, 63, " Gramů ", ("1g", 63)),
+        (ROLL_UNITS, 0.1, "kg", ("100g", 1)),
+        (ROLL_UNITS, 1.5, "kus", ("piece", 1.5)),
+        (ROLL_UNITS, 42, "kus", ("piece", 42)),
+        (TEA_UNITS, 300, None, ("1ml", 300)),
+        (TEA_UNITS, 0.5, "l", ("big-mug", 1)),
+        (TEA_UNITS, 2, "hrnek", ("mug", 2)),
+        (TEA_UNITS, 1, "velký hrnek", ("big-mug", 1)),
+    ],
+)
+def test_apply_unit_selection_amount_semantics(units, amount, unit, expected) -> None:
+    payload = {"title": "fixture", "unitGuid": units[0]["id"], "multiplier": 1, "unitOptions": units}
+
+    _apply_unit_selection(payload, amount=amount, unit=unit, unit_guid=None)
+
+    assert (payload["unitGuid"], payload["multiplier"]) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "units,unit,match",
+    [
+        (ROLL_UNITS, "ml", "No ml unit"),
+        (ROLL_UNITS, "plátek", "not available"),
+        (TEA_UNITS, "g", "No g unit"),
+        (
+            [
+                {"id": "a", "title": "kus (42 g)", "multiplier": 42},
+                {"id": "b", "title": "kus (60 g)", "multiplier": 60},
+            ],
+            "kus",
+            "ambiguous",
+        ),
+    ],
+)
+def test_apply_unit_selection_rejects_unavailable_units(units, unit, match) -> None:
+    payload = {"title": "fixture", "unitGuid": units[0]["id"], "multiplier": 1, "unitOptions": units}
+
+    with pytest.raises(KalorickeTabulkyError, match=match):
+        _apply_unit_selection(payload, amount=2, unit=unit, unit_guid=None)
+
+    assert payload["multiplier"] == 1
