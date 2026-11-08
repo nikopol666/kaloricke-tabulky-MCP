@@ -223,10 +223,12 @@ class KalorickeTabulkyError(Exception):
 class AmbiguousFoodError(KalorickeTabulkyError):
     """A caller must select a GUID or explicitly opt into fuzzy selection."""
 
-    def __init__(self, candidates: list[dict[str, Any]]) -> None:
-        super().__init__(
-            "Ambiguous food query; select food_guid or set allow_fuzzy=true"
-        )
+    def __init__(
+        self,
+        candidates: list[dict[str, Any]],
+        message: str = "Ambiguous food query; select food_guid or set allow_fuzzy=true",
+    ) -> None:
+        super().__init__(message)
         self.candidates = [
             {
                 key: item.get(key)
@@ -492,6 +494,7 @@ class KalorickeTabulkyClient:
         meal_type: str | None = None,
         allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
+        self._require_meal_for_other_days(target_date, target_time, meal_type)
         search_result: dict[str, Any] | None = None
         if food_guid is None:
             if not query:
@@ -517,6 +520,7 @@ class KalorickeTabulkyClient:
         )
         _apply_unit_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
         return {
+            "kind": "food",
             "food_guid": food_guid,
             "title": payload.get("title") or (search_result or {}).get("title"),
             "date": payload.get("date"),
@@ -568,6 +572,7 @@ class KalorickeTabulkyClient:
         meal_type: str | None = None,
         allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
+        self._require_meal_for_other_days(target_date, target_time, meal_type)
         recipe_lookup: dict[str, Any] | None = None
         if recipe_guid is None:
             if not query:
@@ -600,6 +605,7 @@ class KalorickeTabulkyClient:
         )
         _apply_recipe_serving_selection(payload, amount=amount, unit=unit, unit_guid=unit_guid)
         return {
+            "kind": "recipe",
             "food_guid": recipe_guid,
             "title": payload.get("title") or (recipe_lookup or {}).get("title"),
             "date": payload.get("date"),
@@ -638,10 +644,23 @@ class KalorickeTabulkyClient:
                 resolved, RECORD_RECIPE_URL, entries, allow_duplicates
             )
 
+    def _require_meal_for_other_days(
+        self, target_date: date, target_time: str | None, meal_type: str | None
+    ) -> None:
+        # The current clock only says which meal it is today; for another day a
+        # silently inferred meal would usually be wrong.
+        if not meal_type and target_time is None and target_date != local_today(
+            self.timezone
+        ):
+            raise KalorickeTabulkyError(
+                "Set meal_type or time when the date is not today "
+                f"({local_today(self.timezone).isoformat()} in the configured timezone)"
+            )
+
     async def get_duplicate_entries(self, target_date: date) -> list[dict[str, Any]]:
         try:
             return duplicate_entries(await self.get_diary_detail(target_date))
-        except (ValueError, TypeError) as err:
+        except (ValueError, TypeError, KeyError) as err:
             raise KalorickeTabulkyError(
                 f"Cannot safely check diary duplicates: {err}"
             ) from err
@@ -653,10 +672,12 @@ class KalorickeTabulkyClient:
         entries: list[dict[str, Any]],
         allow_duplicates: bool,
     ) -> dict[str, Any]:
+        wanted: dict[str, Any] | None = None
         if not allow_duplicates:
             try:
-                duplicate = find_duplicate(resolved, entries)
-            except (ValueError, TypeError) as err:
+                wanted = resolved_entry(resolved, None)
+                duplicate = find_duplicate(wanted, entries)
+            except (ValueError, TypeError, KeyError) as err:
                 raise KalorickeTabulkyError(
                     f"Cannot safely check diary duplicates: {err}"
                 ) from err
@@ -673,10 +694,11 @@ class KalorickeTabulkyClient:
         entry_guid = None
         if isinstance(data, dict):
             entry_guid = data.get("entryGuid") or data.get("guid") or data.get("id")
-        if not allow_duplicates:
-            entry = resolved_entry(
-                resolved, str(entry_guid) if entry_guid is not None else None
-            )
+        if wanted is not None:
+            entry = {
+                **wanted,
+                "entry_guid": str(entry_guid) if entry_guid is not None else None,
+            }
             # Zero-based successful-write index, independent of existing rows.
             # This also supplies a reference if the API omits the new entry ID.
             entry["written_in_request"] = True
@@ -1275,8 +1297,15 @@ def _select_food(
 
     candidates.sort(key=score, reverse=True)
     best = score(candidates[0])
-    ambiguous = len(candidates) > 1 and (not best[0] or score(candidates[1]) == best)
-    if ambiguous and not allow_fuzzy:
+    if allow_fuzzy:
+        return candidates[0]
+    if not best[0]:
+        # Even a single result is only a guess unless its title matches exactly.
+        raise AmbiguousFoodError(
+            candidates,
+            "No exact title match for query; select food_guid or set allow_fuzzy=true",
+        )
+    if len(candidates) > 1 and score(candidates[1]) == best:
         raise AmbiguousFoodError(candidates)
     return candidates[0]
 

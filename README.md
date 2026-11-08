@@ -66,28 +66,36 @@ the default; writes require an explicit `account` and `commit=true`.
 - `meal_type` accepts `breakfast`, `morning_snack`, `lunch`, `afternoon_snack`,
   `dinner`, `second_dinner`, or IDs `1`–`6`. It takes precedence over `time`.
   With no explicit meal, `time` (`HH:MM`) selects the meal; with neither, the
-  current time in `KT_TIMEZONE` selects it. Preview includes `meal_type_source`:
+  current time in `KT_TIMEZONE` selects it. Inferring from the current time is
+  allowed only for today: a different `date` without `meal_type` or `time` is
+  rejected before any KT request. Preview includes `meal_type_source`:
   `explicit`, `time`, or `now`. Batch item values take precedence over batch
   defaults. Meal boundaries are 05:00, 10:00, 11:30, 14:30, 17:30 and 21:30;
   times before 05:00 use `second_dinner`.
 - Search candidates are ranked by exact normalized title (case/diacritics and
   whitespace ignored), then favorite, then title starting with the query.
-  Multiple candidates without an exact match are always ambiguous, including
-  when one is a favorite. Tied exact matches are also ambiguous unless the
+  Without an exact title match the lookup is always ambiguous, even with a
+  single result or a favorite. Tied exact matches are also ambiguous unless the
   ranking distinguishes them. Responses include `ambiguous: true` and up to
   five ranked `candidates` with `food_guid`, `title`, `brand_name`, `energy` and
-  `unit`. A preview reports `status: "ambiguous"`; a commit reports an error and
-  makes no write. Select a candidate with `food_guid` (or `recipe_guid` for a
+  `unit`. A preview reports `status: "ambiguous"` (also for batch items and
+  recipe ingredients); a commit reports an error and makes no write. Select a candidate with `food_guid` (or `recipe_guid` for a
   recipe), or explicitly opt into the highest ranked result with
   `allow_fuzzy=true`. The override also works on batches, recipe import/create
   requests, and individual ingredients/items. An ambiguous batch item prevents
   the entire batch from writing.
 - Before committing, read the target day's diary and compare food/recipe GUID,
-  meal, selected unit GUID and numeric unit quantity. A match returns
-  `status: "skipped_duplicate"` with `existing_record`, including `entry_guid`;
-  it does not make a write request. Different units are not converted or assumed
-  equivalent. Use `allow_duplicates=true` to intentionally repeat a portion and
-  bypass the diary lookup. Preview performs no duplicate lookup.
+  meal and portion. A match returns `status: "skipped_duplicate"` with
+  `existing_record` (`entry_guid`, `title`, `time`, `unit`, parsed `portion`);
+  it does not make a write request. The diary shows portions only as text such
+  as `1,5 x kus (42 g)`, so the same unit label is compared by count, and
+  different labels by total quantity in g or ml: `1,5 x kus (42 g)` and
+  `63 x 1 g` are the same portion, g and ml are never equated, and a label
+  without a quantity (`lžíce`) only matches the same label. A recipe serving is
+  shown in the diary as its total weight (`306,23 x 1 g`) and is compared by
+  the weight of its scaled ingredients. Use `allow_duplicates=true` to
+  intentionally repeat a portion and bypass the diary lookup. Preview performs
+  no duplicate lookup.
 - A batch reads the diary once per commit attempt and adds each successful
   write to that snapshot, so repeated items within the same batch are also
   skipped. Commit results include `written_count` and `skipped_duplicate_count`;
@@ -97,14 +105,16 @@ the default; writes require an explicit `account` and `commit=true`.
   Independent server instances/external clients can still race: this is a
   read-before-write guard, not server-side transactional idempotency.
 
-Duplicate normalization currently supports explicit `foodstuff`/`entries`
-collections, optionally grouped under `meals`/`items`, with food identity, entry
-identity, meal, selected unit and quantity fields (see `diary.py`). Unknown or
+Duplicate normalization reads the live diary shape (see `diary.py`):
+`data.times[]` with the meal in `id` (`1`–`6`) and rows in `foodstuff[]`, where
+`id` is the diary entry, `guidType` the food or custom recipe GUID and `unit`
+the displayed portion; `activities`, `notes` and totals are ignored. Unknown or
 incomplete structures and diary read failures **block writes** when the guard
-is enabled. The mappings are covered by synthetic fixtures and a local fake KT
-HTTP server; they have not yet been checked against an anonymized live diary
-payload. Live verification on a test account is still required before relying
-on this integration. No real KT requests are made by the tests.
+is enabled. The mapping was checked against a live diary payload and live add
+forms (unit titles such as `kus (42 g)` match the diary text); the tests use an
+anonymized excerpt and a local fake KT HTTP server and make no real KT requests.
+Still unverified with a real write: the ID KT returns for a new entry (only
+used for references within a batch) and the recipe serving weight.
 
 ## Tools
 

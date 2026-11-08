@@ -20,7 +20,7 @@ from kaloricke_tabulky_mcp.client import (
     parse_public_date,
 )
 from kaloricke_tabulky_mcp.config import ConfigError, load_settings
-from kaloricke_tabulky_mcp.diary import duplicate_entries
+from kaloricke_tabulky_mcp.diary import duplicate_entries, parse_unit_text
 from kaloricke_tabulky_mcp.tools import setup_tools
 
 
@@ -152,9 +152,8 @@ def test_candidate_limit_and_distinct_ids():
         "energy",
         "unit",
     }
-    assert (
-        _select_food([results[0], results[0]], "ryze", allow_fuzzy=False) == results[0]
-    )
+    exact = candidate("exact", "Rýže")
+    assert _select_food([exact, exact], "ryze", allow_fuzzy=False) == exact
 
 
 @pytest.fixture
@@ -176,42 +175,82 @@ async def kt(aiohttp_server, monkeypatch):
                     "title": guid,
                     "unitGuid": "g",
                     "multiplier": 1,
-                    "unitOptions": [{"id": "g", "title": "1 g", "multiplier": 1}],
+                    "unitOptions": [
+                        {"id": "g", "title": "1 g", "multiplier": 1},
+                        {"id": "ml", "title": "1 ml", "multiplier": 1},
+                        {"id": "piece", "title": "kus (42 g)", "multiplier": 42},
+                    ],
                     "selectedUnitGuid": "portion",
                     "selectedUnitMultiplier": 1,
+                    "portionsMax": 1,
                     "units": [{"id": "portion", "title": "porce", "multiplier": -2}],
+                    "foodstuff": [
+                        {
+                            "count": 250,
+                            "selectedUnitGuid": "g",
+                            "units": [{"id": "g", "multiplier": 1}],
+                        }
+                    ],
                 },
             }
         )
 
     async def diary(request):
+        # Mirrors the live user/diary/{date}/get shape: rows grouped in times[],
+        # portions only as display text, sibling activities and totals.
         state.calls["diary"] += 1
         if state.detail_override is not None:
             return web.json_response(state.detail_override)
+        rows = state.rows.get(request.match_info["date"], [])
         return web.json_response(
             {
                 "code": 0,
-                "data": {"foodstuff": state.rows.get(request.match_info["date"], [])},
+                "data": {
+                    "times": [
+                        {
+                            "id": meal,
+                            "title": f"meal {meal}",
+                            "foodstuff": [row for at, row in rows if at == meal],
+                            "notes": [],
+                        }
+                        for meal in "123456"
+                    ],
+                    "activities": [
+                        {"id": "activity", "type": "activity", "unit": "44 min"}
+                    ],
+                    "notes": [],
+                    "energyTotal": 0,
+                },
             }
         )
+
+    def amount(value):
+        return f"{float(value):g}".replace(".", ",")
 
     async def record(request):
         assert request.headers["Accept"] == "application/json, text/plain, */*"
         state.calls["post"] += 1
         body = await request.json()
-        recipe = request.path == "/record-recipe"
+        if request.path == "/record-recipe":
+            total = sum(item["count"] for item in body["foodstuff"])
+            unit = f"{amount(total)} x 1 g"
+        else:
+            title = next(
+                o["title"] for o in body["unitOptions"] if o["id"] == body["unitGuid"]
+            )
+            count = float(body["multiplier"])
+            unit = title if count == 1 else f"{amount(count)} x {title}"
         row = {
-            "guid": f"entry-{state.calls['post']}",
-            "foodstuffGuid": body["foodstuffGuid"],
-            "diaryTimeGuid": body["diaryTimeGuid"],
-            "unitGuid": body["selectedUnitGuid"] if recipe else body["unitGuid"],
-            "multiplier": (
-                body["selectedUnitMultiplier"] if recipe else body["multiplier"]
-            ),
+            "id": f"entry-{state.calls['post']}",
+            "type": "foodstuff",
+            "guidType": body["foodstuffGuid"],
+            "title": body["title"],
+            "time": body.get("time") or "12:00",
+            "unit": unit,
         }
-        state.rows.setdefault(body["date"], []).append(row)
+        state.rows.setdefault(body["date"], []).append((body["diaryTimeGuid"], row))
         return web.json_response(
-            {"code": 0, "data": {"guid": row["guid"]}, "message": "ok"}
+            {"code": 0, "data": {"guid": row["id"]}, "message": "ok"}
         )
 
     app = web.Application()
@@ -396,6 +435,7 @@ async def test_duplicates_within_batch_and_opt_out(kt):
     args = {
         "account": "personal",
         "date": "2026-01-01",
+        "default_meal_type": "lunch",
         "commit": True,
         "items": [{"food_guid": "rice", "amount": 100}] * 2,
     }
@@ -431,17 +471,21 @@ async def test_different_entries_are_not_duplicates(kt, change):
     assert kt.calls["post"] == 2
 
 
+ROW = {"id": "entry", "guidType": "rice", "unit": "1 g"}
+
+
 @pytest.mark.parametrize(
     "data",
     [
         {},
-        {"unrecognized": [1]},
-        {"foodstuff": [{"guid": "unknown"}]},
-        {
-            "foodstuff": [
-                {"foodstuffGuid": "rice", "guid": "entry", "diaryTimeGuid": "3"}
-            ]
-        },
+        {"foodstuff": []},
+        {"times": {}},
+        {"times": [{"id": "7", "foodstuff": []}]},
+        {"times": [{"id": "3", "foodstuff": {}}]},
+        {"times": [{"id": "3", "foodstuff": [{**ROW, "id": None}]}]},
+        {"times": [{"id": "3", "foodstuff": [{**ROW, "guidType": ""}]}]},
+        {"times": [{"id": "3", "foodstuff": [{**ROW, "unit": ""}]}]},
+        {"times": [{"id": "3", "foodstuff": [{**ROW, "unit": "0 x kus (42 g)"}]}]},
     ],
 )
 async def test_unknown_diary_shape_blocks_writes(kt, data):
@@ -459,6 +503,7 @@ async def test_diary_read_failure_blocks_entire_batch(kt):
     result = await kt.tools["record_food_batch"](
         account="personal",
         date="2026-01-01",
+        default_meal_type="lunch",
         commit=True,
         items=[{"food_guid": "rice", "amount": 100}],
     )
@@ -466,16 +511,20 @@ async def test_diary_read_failure_blocks_entire_batch(kt):
     assert kt.calls["post"] == 0
 
 
-async def test_batch_with_ambiguity_writes_nothing(kt):
+@pytest.mark.parametrize("commit", [False, True])
+async def test_batch_with_ambiguity_writes_nothing(kt, commit):
     kt.searches = [{"id": "a", "title": "Rýže A"}, {"id": "b", "title": "Rýže B"}]
     result = await kt.tools["record_food_batch"](
         account="personal",
         date="2026-01-01",
-        commit=True,
+        default_meal_type="lunch",
+        commit=commit,
         items=[{"food_guid": "chicken", "amount": 100}, {"query": "ryze", "amount": 1}],
     )
     assert result["failure_count"] == 1
     assert result["results"][1]["ambiguous"] is True
+    # Same status contract as the single-item tools.
+    assert result["results"][1]["status"] == ("error" if commit else "ambiguous")
     assert kt.calls["post"] == kt.calls["diary"] == 0
 
 
@@ -503,6 +552,7 @@ async def test_batch_reference_when_write_response_omits_entry_id(kt, monkeypatc
     result = await kt.tools["record_food_batch"](
         account="personal",
         date="2026-01-01",
+        default_meal_type="lunch",
         commit=True,
         items=[{"food_guid": "rice", "amount": 100}] * 2,
     )
@@ -568,7 +618,7 @@ async def test_recipe_lookup_also_blocks_ambiguity(kt, monkeypatch):
 
 async def test_different_units_are_not_duplicates(kt, monkeypatch):
     resolved = await kt.client.resolve_food(
-        food_guid="rice", target_date=date(2026, 1, 1), amount=100
+        food_guid="rice", target_date=date(2026, 1, 1), amount=100, meal_type="lunch"
     )
     first = await kt.client.record_resolved_food(resolved)
     assert first["entry_guid"] == "entry-1"
@@ -578,23 +628,199 @@ async def test_different_units_are_not_duplicates(kt, monkeypatch):
     assert kt.calls["post"] == 2
 
 
-def test_grouped_diary_inherits_meal_and_ignores_recipe_ingredients():
-    row = {
-        "foodstuffGuid": "recipe",
-        "guid": "entry",
-        "selectedUnitGuid": "portion",
-        "selectedUnitMultiplier": "1,5",
-        "foodstuff": [{"guid": "ingredient"}],
+async def test_same_quantity_in_another_unit_is_duplicate(kt):
+    args = {
+        "account": "personal",
+        "date": "2026-01-01",
+        "meal_type": "breakfast",
+        "food_guid": "roll",
+        "commit": True,
     }
-    entries = duplicate_entries(
-        {"data": {"meals": [{"diaryTimeGuid": "3", "foodstuff": [row]}]}}
+    first = await kt.tools["record_food"](**args, amount=63, unit_guid="g")
+    second = await kt.tools["record_food"](**args, amount=1.5, unit_guid="piece")
+    assert first["status"] == "written"
+    assert second["status"] == "skipped_duplicate"
+    assert second["existing_record"]["unit"] == "63 x 1 g"
+    assert kt.calls["post"] == 1
+
+
+async def test_recipe_serving_compares_total_weight(kt):
+    args = {
+        "account": "personal",
+        "date": "2026-01-01",
+        "meal_type": "dinner",
+        "recipe_guid": "soup",
+        "amount": 1,
+        "commit": True,
+    }
+    assert (await kt.tools["record_recipe_serving"](**args))["status"] == "written"
+    assert kt.rows["01.01.2026"][0][1]["unit"] == "250 x 1 g"
+    second = await kt.tools["record_recipe_serving"](**args)
+    assert second["status"] == "skipped_duplicate"
+    assert second["existing_record"]["portion"]["quantity"] == 250
+
+
+@pytest.mark.parametrize(
+    "tool,reference",
+    [
+        ("record_food", {"food_guid": "rice"}),
+        ("record_recipe_serving", {"recipe_guid": "recipe"}),
+    ],
+)
+async def test_other_day_requires_explicit_meal_or_time(kt, freeze, tool, reference):
+    freeze("2026-01-02T10:00:00+00:00")
+    result = await kt.tools[tool](account="personal", date="2026-01-01", **reference)
+    assert result["status"] == "error"
+    assert "meal_type or time" in result["error"]
+    assert kt.calls["form"] == kt.calls["search"] == 0
+    result = await kt.tools[tool](
+        account="personal", date="2026-01-01", time="19:00", **reference
     )
-    assert entries == [
+    assert (result["meal_type"], result["meal_type_source"]) == ("5", "time")
+
+
+@pytest.mark.parametrize("commit", [False, True])
+async def test_single_non_exact_result_is_not_auto_selected(kt, commit):
+    kt.searches = [{"id": "roll", "title": "Rohlík tukový", "clazz": "foodstuff"}]
+    result = await kt.tools["record_food"](
+        account="personal", query="rohlik", amount=1, commit=commit
+    )
+    assert result["ambiguous"] is True
+    assert result["status"] == ("error" if commit else "ambiguous")
+    assert "exact" in result["error"]
+    assert kt.calls["form"] == kt.calls["post"] == 0
+    exact = await kt.tools["record_food"](account="personal", query="ROHLIK tukovy")
+    assert exact["food_guid"] == "roll"
+
+
+# Anonymized excerpt of a live user/diary/{date}/get payload (2026-11).
+LIVE_DIARY = {
+    "date": 1794006000000,
+    "energyUnit": "kcal",
+    "times": [
         {
-            "entry_guid": "entry",
-            "food_guid": "recipe",
-            "meal_type": "3",
-            "unit_guid": "portion",
-            "multiplier": 1.5,
+            "id": "1",
+            "title": "Snídaně",
+            "foodstuff": [
+                {
+                    "id": "e0000000000000000000000000000001",
+                    "type": "foodstuff",
+                    "guidType": "r0000000000000000000000000000001",
+                    "title": "Custom recipe",
+                    "unit": "306,23 x 1 g",
+                    "energy": "0,16",
+                    "time": "08:15",
+                    "editableUnit": False,
+                    "guidUserMeal": "r0000000000000000000000000000001",
+                    "guidRecipe": None,
+                    "isRecipe": False,
+                },
+                {
+                    "id": "e0000000000000000000000000000002",
+                    "type": "foodstuff",
+                    "guidType": "f000000000000001",
+                    "title": "Tea",
+                    "unit": "hrnek (220 ml)",
+                    "time": "08:15",
+                    "guidUserMeal": None,
+                },
+                {
+                    "id": "e0000000000000000000000000000003",
+                    "type": "foodstuff",
+                    "guidType": "f000000000000002",
+                    "title": "Roll",
+                    "unit": "1,5 x kus (42 g)",
+                    "time": "08:15",
+                },
+            ],
+            "notes": [],
+            "energyTotal": "366,66",
+        },
+        {"id": "4", "title": "Odpolední svačina", "foodstuff": [], "notes": []},
+        {
+            "id": "5",
+            "title": "Večeře",
+            "foodstuff": [
+                {
+                    "id": "e0000000000000000000000000000004",
+                    "type": "foodstuff",
+                    "guidType": "f000000000000003",
+                    "title": "Potatoes",
+                    "unit": "50 g",
+                    "time": "18:58",
+                },
+                {
+                    "id": "e0000000000000000000000000000005",
+                    "type": "foodstuff",
+                    "guidType": "f000000000000004",
+                    "title": "Beer",
+                    "unit": "3 x sklenice (500 ml)",
+                    "time": "18:58",
+                },
+            ],
+            "notes": [],
+        },
+    ],
+    "activities": [
+        {
+            "id": "a0000000000000000000000000000001",
+            "type": "activity",
+            "guidType": None,
+            "unit": "44 min",
         }
+    ],
+    "notes": [],
+    "energyTotal": 0,
+    "foodstuffCount": 5,
+}
+
+
+def test_live_diary_payload_is_normalized():
+    entries = duplicate_entries({"data": LIVE_DIARY})
+    summary = [
+        (
+            e["meal_type"],
+            e["food_guid"][:4],
+            e["entry_guid"][-1],
+            e["portion"]["quantity"],
+            e["portion"]["dimension"],
+        )
+        for e in entries
     ]
+    assert summary == [
+        ("1", "r000", "1", 306.23, "g"),
+        ("1", "f000", "2", 220, "ml"),
+        ("1", "f000", "3", 63, "g"),
+        ("5", "f000", "4", 50, "g"),
+        ("5", "f000", "5", 1500, "ml"),
+    ]
+
+
+def test_empty_live_day_has_no_entries():
+    empty = {
+        "times": [{"id": str(i), "foodstuff": [], "notes": []} for i in range(1, 7)],
+        "activities": [],
+        "notes": [],
+    }
+    assert duplicate_entries({"data": empty}) == []
+
+
+@pytest.mark.parametrize(
+    "text,label,count,quantity,dimension",
+    [
+        ("kus (88 g)", "kus (88 g)", 1, 88, "g"),
+        ("3 x plátek (17 g)", "plátek (17 g)", 3, 51, "g"),
+        ("170 x 1 g", "1 g", 170, 170, "g"),
+        ("1 208,5 x 1 g", "1 g", 1208.5, 1208.5, "g"),
+        ("balení (0,5 l)", "balení (0.5 l)", 1, 500, "ml"),
+        ("2 x lžíce", "lžíce", 2, None, None),
+    ],
+)
+def test_parse_unit_text(text, label, count, quantity, dimension):
+    portion = parse_unit_text(text)
+    assert (portion["label"], portion["count"], portion["dimension"]) == (
+        label,
+        count,
+        dimension,
+    )
+    assert portion["quantity"] == (pytest.approx(quantity) if quantity else None)

@@ -155,8 +155,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             return _write_result(preview, written)
         except AmbiguousFoodError as err:
             return {
-                **_error(err),
-                "status": "error" if commit else "ambiguous",
+                **_error(err, preview=not commit),
                 "account": account,
                 "mode": "commit" if commit else "preview",
             }
@@ -223,7 +222,9 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                 success_count += 1
             except KalorickeTabulkyError as err:
                 failure_count += 1
-                results.append({"index": index, **_error(err)})
+                results.append(
+                    {"index": index, **_error(err, preview=not request.commit)}
+                )
                 if not request.continue_on_error:
                     break
 
@@ -339,7 +340,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                         "status": "error",
                         "source": ingredient.source,
                         "source_id": ingredient.source_id,
-                        **_error(err),
+                        **_error(err, preview=True),
                     }
                 )
                 if not request.continue_on_error:
@@ -440,7 +441,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                         "status": "error",
                         "source": ingredient.source,
                         "source_id": ingredient.source_id,
-                        **_error(err),
+                        **_error(err, preview=not request.commit),
                     }
                 )
                 if not request.continue_on_error:
@@ -625,8 +626,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             return _write_result(preview, written)
         except AmbiguousFoodError as err:
             return {
-                **_error(err),
-                "status": "error" if commit else "ambiguous",
+                **_error(err, preview=not commit),
                 "account": account,
                 "mode": "commit" if commit else "preview",
             }
@@ -774,11 +774,14 @@ def _decode_base64_image(value: str) -> bytes:
     return decoded
 
 
-def _error(err: Exception) -> dict[str, Any]:
+def _error(err: Exception, *, preview: bool = False) -> dict[str, Any]:
+    """Error payload; an ambiguous lookup in a preview reports status "ambiguous"."""
     logger.warning("Tool call failed: %s", err)
     result = {"status": "error", "error": str(err), "type": err.__class__.__name__}
     if isinstance(err, AmbiguousFoodError):
         result.update(ambiguous=True, candidates=err.candidates)
+        if preview:
+            result["status"] = "ambiguous"
     return result
 
 
