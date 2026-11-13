@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LOWER_IMAGE = "ghcr.io/nikopol666/kaloricke-tabulky-mcp"
-BAD_IMAGE = "ghcr.io/nikopol666/kaloricke-tabulky-" + "MCP"
+LOWER_IMAGE = "ghcr.io/michalprouza/kaloricke-tabulky-mcp"
+BAD_IMAGE = "ghcr.io/michalprouza/kaloricke-tabulky-" + "MCP"
 
 
 def _text_files() -> list[Path]:

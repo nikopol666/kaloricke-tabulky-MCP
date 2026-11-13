@@ -27,4 +27,4 @@ jobs:
         with:
           context: .
           push: false
-          tags: ghcr.io/nikopol666/kaloricke-tabulky-mcp:ci
+          tags: ghcr.io/michalprouza/kaloricke-tabulky-mcp:ci

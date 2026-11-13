@@ -13,9 +13,14 @@ from pydantic import ValidationError
 from .account_registry import AccountRegistry
 from .client import AmbiguousFoodError, KalorickeTabulkyError
 from .clock import local_today
+from .concurrency import resolve_food_items
+from .errors import short_error
 from .models import (
     CreateCustomRecipeRequest,
     DiarySummaryRequest,
+    DiaryRangeRequest,
+    DiaryEntriesRequest,
+    DeleteDiaryEntryRequest,
     ListCustomRecipesRequest,
     PrepareRecipeImportRequest,
     RecordFoodBatchRequest,
@@ -30,11 +35,16 @@ logger = logging.getLogger(__name__)
 
 
 def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
-    """Register all MCP tools."""
+    """Register public tools and opt-in diagnostics."""
+    diagnostic = (
+        mcp.tool if registry.settings.enable_diagnostics else lambda: lambda func: func
+    )
 
     @mcp.tool()
     async def health_check() -> dict[str, Any]:
-        """Return safe process/config health without active account login probes."""
+        """Check process/config liveness without logging in to KT. No parameters.
+        Never writes; this does not validate remote account authentication.
+        """
         return {
             "status": "healthy",
             "server": "Kaloricke Tabulky MCP",
@@ -43,17 +53,27 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
 
     @mcp.tool()
     async def list_accounts() -> dict[str, Any]:
-        """List configured account aliases without exposing secrets."""
+        """Discover configured account aliases and masked email addresses before
+        selecting an account. No parameters. Never writes or exposes
+        credentials.
+        """
         return {"accounts": registry.list_accounts()}
 
     @mcp.tool()
     async def check_account_auth(account: str) -> dict[str, Any]:
-        """Run an explicit bounded authentication check for one account."""
+        """Explicitly validate remote login for the required account alias. Makes
+        a bounded authentication request and returns safe diagnostics; does
+        not write diary data.
+        """
         return await registry.check_auth(account)
 
-    @mcp.tool()
+    @diagnostic()
     async def probe_user_meal_endpoints(account: str) -> dict[str, Any]:
-        """Read-only probe for private KT custom meal/recipe form endpoints."""
+        """Inspect private custom recipe form metadata for the required account.
+        Available only with KT_ENABLE_DIAGNOSTICS=true. Reads candidate pages
+        and never calls add/save endpoints; use create_custom_recipe with
+        account and commit=true to create a recipe.
+        """
         try:
             client = registry.get_write_client(account)
             return await client.probe_user_meal_endpoints()
@@ -68,7 +88,11 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         page: int = 0,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Search Kaloricke Tabulky food or drink records."""
+        """Find food/drink GUIDs before previewing diary writes. Requires query;
+        account may use KT_DEFAULT_ACCOUNT. kind is food or drink. page starts
+        at 0 and limit is 1-50. Never writes. Pass the selected food_guid to
+        record_food to avoid ambiguous matches.
+        """
         try:
             request = SearchFoodRequest(
                 account=account, query=query, kind=kind, page=page, limit=limit
@@ -88,7 +112,11 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         page: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List private KT custom recipes/meals and their GUIDs."""
+        """Find private recipe GUIDs for an account before recording a serving.
+        Requires account; query is optional, page starts at 0 and limit is
+        1-100. Never writes. Use the returned recipe_guid in
+        record_recipe_serving.
+        """
         try:
             request = ListCustomRecipesRequest(
                 account=account, query=query, page=page, limit=limit
@@ -116,7 +144,15 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         allow_fuzzy: bool = False,
         allow_duplicates: bool = False,
     ) -> dict[str, Any]:
-        """Preview or record a single food/drink item. Writes only with commit=true."""
+        """Preview or record one food/drink entry. Requires account and query or
+        food_guid. date is YYYY-MM-DD, defaulting to the local date in
+        KT_TIMEZONE. meal_type accepts breakfast, morning_snack, lunch,
+        afternoon_snack, dinner, second_dinner, or 1-6. An explicit meal wins
+        over HH:MM time; if both are omitted the local current time selects
+        the meal. Preview reports meal_type_source. Writes require
+        commit=true. Ambiguous queries block writes unless allow_fuzzy=true;
+        duplicates are skipped unless allow_duplicates=true.
+        """
         try:
             request = RecordFoodRequest(
                 account=account,
@@ -174,7 +210,18 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         allow_fuzzy: bool = False,
         allow_duplicates: bool = False,
     ) -> dict[str, Any]:
-        """Preview or record normalized food items from assistant/Mealie workflows."""
+        """Preview or record multiple normalized food/drink entries. Requires
+        account, YYYY-MM-DD date and items. Each item requires a reference and
+        positive amount. meal_type accepts breakfast, morning_snack, lunch,
+        afternoon_snack, dinner, second_dinner, or 1-6. Item meal/time values
+        override default_meal_type/default_time (HH:MM); omitted values use
+        local current time. Reads resolve concurrently; writes remain
+        sequential and require commit=true. Any resolution error prevents all
+        writes; continue_on_error=false stops reported results at the first
+        error and stops later writes after a write error. Already-started read
+        lookups may finish. allow_fuzzy opts into approximate matches;
+        allow_duplicates opts into repeated portions.
+        """
         try:
             request = RecordFoodBatchRequest(
                 account=account,
@@ -195,20 +242,18 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         success_count = 0
         failure_count = 0
         resolved_items: list[dict[str, Any]] = []
-        for index, item in enumerate(request.items):
+        resolutions = await resolve_food_items(
+            client,
+            request.items,
+            request.date,
+            allow_fuzzy=request.allow_fuzzy,
+            meal_type=request.default_meal_type,
+            target_time=request.default_time,
+        )
+        for index, (item, resolved) in enumerate(zip(request.items, resolutions)):
             try:
-                resolved = await client.resolve_food(
-                    query=item.effective_query(),
-                    food_guid=item.food_guid,
-                    kind=item.kind,
-                    amount=item.amount,
-                    unit=item.unit,
-                    unit_guid=item.unit_guid,
-                    target_date=request.date,
-                    target_time=item.time or request.default_time,
-                    meal_type=item.meal_type or request.default_meal_type,
-                    allow_fuzzy=item.allow_fuzzy or request.allow_fuzzy,
-                )
+                if isinstance(resolved, Exception):
+                    raise resolved
                 resolved_items.append(resolved)
                 results.append(
                     {
@@ -220,7 +265,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     }
                 )
                 success_count += 1
-            except KalorickeTabulkyError as err:
+            except (KalorickeTabulkyError, ValueError) as err:
                 failure_count += 1
                 results.append(
                     {"index": index, **_error(err, preview=not request.commit)}
@@ -247,7 +292,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     if request.allow_duplicates
                     else await client.get_duplicate_entries(request.date)
                 )
-            except KalorickeTabulkyError as err:
+            except (KalorickeTabulkyError, ValueError) as err:
                 return {"account": client.alias, "mode": "commit", **_error(err)}
             for index, resolved in enumerate(resolved_items):
                 try:
@@ -264,7 +309,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                             ),
                         }
                     )
-                except KalorickeTabulkyError as err:
+                except (KalorickeTabulkyError, ValueError) as err:
                     write_failures += 1
                     written_results.append({"index": index, **_error(err)})
                     if not request.continue_on_error:
@@ -295,7 +340,14 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         continue_on_error: bool = True,
         allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
-        """Resolve recipe ingredients for KT custom recipe creation preview."""
+        """Resolve ingredients and preview recipe matches without creating a
+        recipe. Requires account, title and ingredients (reference plus
+        positive amount per ingredient). Uses the local current date in
+        KT_TIMEZONE for ingredient forms. Never writes; review matches before
+        calling create_custom_recipe with commit=true. allow_fuzzy opts into
+        approximate matches, globally or per ingredient. Lookup results retain
+        input order.
+        """
         try:
             request = PrepareRecipeImportRequest(
                 account=account,
@@ -316,23 +368,23 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         resolved_ingredients: list[dict[str, Any]] = []
         success_count = 0
         failure_count = 0
-        for index, ingredient in enumerate(request.ingredients):
+        resolutions = await resolve_food_items(
+            client,
+            request.ingredients,
+            local_today(registry.settings.timezone),
+            allow_fuzzy=request.allow_fuzzy,
+        )
+        for index, (ingredient, resolved) in enumerate(
+            zip(request.ingredients, resolutions)
+        ):
             try:
-                resolved = await client.resolve_food(
-                    query=ingredient.effective_query(),
-                    food_guid=ingredient.food_guid,
-                    kind=ingredient.kind,
-                    amount=ingredient.amount,
-                    unit=ingredient.unit,
-                    unit_guid=ingredient.unit_guid,
-                    target_date=local_today(registry.settings.timezone),
-                    allow_fuzzy=ingredient.allow_fuzzy or request.allow_fuzzy,
-                )
+                if isinstance(resolved, Exception):
+                    raise resolved
                 preview = _recipe_ingredient_preview(index, ingredient, resolved)
                 results.append(preview)
                 resolved_ingredients.append(preview)
                 success_count += 1
-            except KalorickeTabulkyError as err:
+            except (KalorickeTabulkyError, ValueError) as err:
                 failure_count += 1
                 results.append(
                     {
@@ -386,10 +438,13 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         continue_on_error: bool = True,
         allow_fuzzy: bool = False,
     ) -> dict[str, Any]:
-        """Preview or create a real KT custom recipe from resolved ingredients.
-
-        Writes only with commit=true. The returned recipe_guid can be used by
-        record_recipe_serving to log portions of the created recipe.
+        """Preview or create/update a private KT recipe from ingredients.
+        Requires account, title and ingredients; recipe_guid selects an
+        existing recipe to update. Ingredient forms use the local date in
+        KT_TIMEZONE. Writes require commit=true and all ingredients to resolve
+        successfully. allow_fuzzy opts into approximate matches. The returned
+        recipe_guid can be used in record_recipe_serving. include_payload=true
+        adds the larger diagnostic payload.
         """
         try:
             request = CreateCustomRecipeRequest(
@@ -417,23 +472,23 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         resolved_ingredients: list[dict[str, Any]] = []
         success_count = 0
         failure_count = 0
-        for index, ingredient in enumerate(request.ingredients):
+        resolutions = await resolve_food_items(
+            client,
+            request.ingredients,
+            local_today(registry.settings.timezone),
+            allow_fuzzy=request.allow_fuzzy,
+        )
+        for index, (ingredient, resolved) in enumerate(
+            zip(request.ingredients, resolutions)
+        ):
             try:
-                resolved = await client.resolve_food(
-                    query=ingredient.effective_query(),
-                    food_guid=ingredient.food_guid,
-                    kind=ingredient.kind,
-                    amount=ingredient.amount,
-                    unit=ingredient.unit,
-                    unit_guid=ingredient.unit_guid,
-                    target_date=local_today(registry.settings.timezone),
-                    allow_fuzzy=ingredient.allow_fuzzy or request.allow_fuzzy,
-                )
+                if isinstance(resolved, Exception):
+                    raise resolved
                 preview = _recipe_ingredient_preview(index, ingredient, resolved)
                 results.append(preview)
                 resolved_ingredients.append(resolved)
                 success_count += 1
-            except KalorickeTabulkyError as err:
+            except (KalorickeTabulkyError, ValueError) as err:
                 failure_count += 1
                 results.append(
                     {
@@ -459,7 +514,7 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
                     description=request.description,
                     recipe_guid=request.recipe_guid or "0",
                 )
-            except KalorickeTabulkyError as err:
+            except (KalorickeTabulkyError, ValueError) as err:
                 return _error(err)
 
         preview = {
@@ -517,12 +572,11 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         field_name: str = "file",
         commit: bool = False,
     ) -> dict[str, Any]:
-        """Preview or upload an image to an existing KT custom recipe.
-
-        Writes only with commit=true. image_base64 may be raw base64 or a
-        data:image/...;base64 URL. The default multipart field name is "file",
-        matching the observed KT image/create flow unless a future capture shows
-        another form field.
+        """Preview or upload an image to an existing recipe. Requires account,
+        recipe_guid and image_base64 (raw base64 or data:image/...;base64
+        URL). Writes require commit=true. The authenticated account session is
+        used; do not provide browser cookies. field_name defaults to file,
+        matching the observed KT multipart flow.
         """
         try:
             request = UploadCustomRecipeImageRequest(
@@ -584,10 +638,14 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         allow_fuzzy: bool = False,
         allow_duplicates: bool = False,
     ) -> dict[str, Any]:
-        """Preview or record a serving of a KT custom recipe once it exists.
-
-        KT custom recipes appear in the same food/meal autocomplete surface, so
-        this intentionally reuses the existing diary add flow.
+        """Preview or record a serving of an existing private recipe. Requires
+        account and recipe_guid, food_guid or query. date is YYYY-MM-DD and
+        defaults to the local date in KT_TIMEZONE. meal_type accepts
+        breakfast, morning_snack, lunch, afternoon_snack, dinner,
+        second_dinner, or 1-6. Explicit meal wins over HH:MM time; otherwise
+        use local current time. Writes require commit=true; ambiguous queries
+        and duplicate portions are blocked/skipped by default. allow_fuzzy and
+        allow_duplicates opt into those behaviors.
         """
         try:
             request = RecordRecipeServingRequest(
@@ -634,8 +692,59 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
             return _error(err)
 
     @mcp.tool()
+    async def get_diary_range(account: str, date_from: str, date_to: str) -> dict[str, Any]:
+        """Analyze daily nutrient trends over an inclusive range. Requires
+        account, date_from and date_to in YYYY-MM-DD format, with at most 92
+        days. Returns standard nutrient units, optional energy target/weight
+        and averages excluding empty days and missing metrics. Uses
+        KT_MAX_CONCURRENCY for bounded reads. Never writes; a failed read is
+        an error, not an empty day.
+        """
+        try:
+            request = DiaryRangeRequest(account=account, date_from=date_from, date_to=date_to)
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.get_diary_range(request.date_from, request.date_to)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
+    async def get_diary_entries(account: str, date: str | None = None) -> dict[str, Any]:
+        """Read a compact diary grouped by meal, with per-meal and daily nutrient
+        totals. Requires account; date uses YYYY-MM-DD and defaults to the
+        local date in KT_TIMEZONE. Missing nutrient totals remain null. Never
+        writes. This draft adapter still needs an anonymized live KT fixture
+        to verify field mappings.
+        """
+        try:
+            request = DiaryEntriesRequest(account=account, date=date or local_today(registry.settings.timezone))
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.get_diary_entries(request.date)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
+    async def delete_diary_entry(account: str, date: str, entry_guid: str, commit: bool = False) -> dict[str, Any]:
+        """Preview deletion of a diary entry and confirm its membership in the
+        requested day. Requires account, YYYY-MM-DD date and entry_guid from
+        get_diary_entries. Preview includes title, quantity and meal. Writes
+        would require commit=true, but actual deletion is currently disabled
+        until its KT method, endpoint and body are verified. commit=true
+        currently returns an error without deleting.
+        """
+        try:
+            request = DeleteDiaryEntryRequest(account=account, date=date, entry_guid=entry_guid, commit=commit)
+            client = registry.get_write_client(request.account)
+            return {"account": client.alias, **await client.delete_diary_entry(request.date, request.entry_guid, commit=request.commit)}
+        except (ValidationError, ValueError, KalorickeTabulkyError) as err:
+            return _error(err)
+
+    @mcp.tool()
     async def get_diary_summary(account: str | None = None, date: str | None = None) -> dict[str, Any]:
-        """Return safe daily diary summary metrics."""
+        """Read daily nutrition and weight metrics. account may use
+        KT_DEFAULT_ACCOUNT; date uses YYYY-MM-DD and defaults to the local
+        date in KT_TIMEZONE. Never writes. Prefer get_diary_range for trends
+        across several days.
+        """
         try:
             request = DiarySummaryRequest(
                 account=account, date=date or local_today(registry.settings.timezone)
@@ -646,9 +755,14 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         except (ValidationError, ValueError, KalorickeTabulkyError) as err:
             return _error(err)
 
-    @mcp.tool()
+    @diagnostic()
     async def get_diary_detail(account: str | None = None, date: str | None = None) -> dict[str, Any]:
-        """Return the raw daily diary detail payload for diagnostics."""
+        """Diagnose unsupported diary structures using the full raw daily
+        payload, which is expensive in tokens. Requires
+        KT_ENABLE_DIAGNOSTICS=true. account may use KT_DEFAULT_ACCOUNT; date
+        uses YYYY-MM-DD and defaults to the local date in KT_TIMEZONE. Never
+        writes. Prefer get_diary_entries for a compact view.
+        """
         try:
             request = DiarySummaryRequest(
                 account=account, date=date or local_today(registry.settings.timezone)
@@ -666,7 +780,10 @@ def setup_tools(mcp: FastMCP, registry: AccountRegistry) -> None:
         date: str | None = None,
         commit: bool = False,
     ) -> dict[str, Any]:
-        """Preview or record body weight. Writes only with commit=true."""
+        """Preview or record body weight. Requires account and positive
+        weight_kg. date uses YYYY-MM-DD and defaults to the local date in
+        KT_TIMEZONE. Writes require commit=true; preview is the default.
+        """
         try:
             request = RecordWeightRequest(
                 account=account,
@@ -776,8 +893,9 @@ def _decode_base64_image(value: str) -> bytes:
 
 def _error(err: Exception, *, preview: bool = False) -> dict[str, Any]:
     """Error payload; an ambiguous lookup in a preview reports status "ambiguous"."""
-    logger.warning("Tool call failed: %s", err)
-    result = {"status": "error", "error": str(err), "type": err.__class__.__name__}
+    message = short_error(str(err))
+    logger.warning("Tool call failed: %s", message)
+    result = {"status": "error", "error": message, "type": err.__class__.__name__}
     if isinstance(err, AmbiguousFoodError):
         result.update(ambiguous=True, candidates=err.candidates)
         if preview:

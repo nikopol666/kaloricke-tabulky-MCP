@@ -2,6 +2,8 @@
 
 MCP server for searching and writing Kaloricke Tabulky food diary entries through the unofficial web endpoints used by the Kaloricke Tabulky web app.
 
+This is a fork of [nikopol666/kaloricke-tabulky-MCP](https://github.com/nikopol666/kaloricke-tabulky-MCP) with diary data safety, diary range/entry reads and hardened authentication (see `CHANGELOG.md`). Images are published to `ghcr.io/michalprouza/kaloricke-tabulky-mcp`.
+
 The server is designed for assistant workflows such as "record these Mealie-derived foods into Kaloricke Tabulky" without coupling v1 directly to Mealie. It accepts normalized item payloads from any caller.
 
 ## Safety Model
@@ -26,7 +28,7 @@ curl -fsS http://localhost:8080/health
 Image:
 
 ```text
-ghcr.io/nikopol666/kaloricke-tabulky-mcp:latest
+ghcr.io/michalprouza/kaloricke-tabulky-mcp:latest
 ```
 
 `latest` is published only from semver release tags.
@@ -44,6 +46,8 @@ KT_ACCOUNT_PARTNER_PASSWORD=replace-me
 # KT_ACCOUNT_PARTNER_PASSWORD_MD5=32-character-browser-md5
 KT_DEFAULT_ACCOUNT=personal
 KT_TIMEZONE=Europe/Prague
+KT_MAX_CONCURRENCY=4
+KT_ENABLE_DIAGNOSTICS=false
 MCP_BEARER_TOKEN=replace-me-long-random-token
 MCP_HTTP_PORT=8080
 ```
@@ -125,6 +129,81 @@ Still unverified with a real write: the ID KT returns for a new entry (only
 used for references within a batch) and the recipe serving weight.
 
 ## Tools
+
+### Robustness and diagnostics (phase 3)
+
+Concurrent requests on one client share a locked authentication refresh. A
+session generation counter prevents late failures from triggering another
+login after another request already refreshed the session. Requests retry once
+after a redirect, HTTP 401/403, or a nonzero API code with a recognized login
+message. A second authentication failure is returned without another retry.
+Unrelated business errors do not trigger login.
+
+The JSON login-message allowlist is conservative and tested with synthetic
+English/Czech messages. **The exact live KT expiry message still needs a captured
+response to complete that verification of phase 3.2.** HTTP status handling and
+concurrent login behavior are covered by a local fake HTTP server.
+
+API error text is limited to 300 characters and includes the response type.
+Sanitized full error bodies are available only at DEBUG level. Passwords,
+password-equivalent hashes, known session cookie values and named credential
+fields are redacted before both error rendering and DEBUG logging.
+
+Food and ingredient resolution in batches, recipe preparation and recipe
+creation runs concurrently under the same per-client `KT_MAX_CONCURRENCY`
+semaphore as daily range reads. Results retain input order; diary writes remain
+sequential. `continue_on_error=false` stops reported results at the first input
+error and stops subsequent writes after a write error. Read lookups already
+started concurrently may finish; any resolution error prevents all writes.
+
+`KT_ENABLE_DIAGNOSTICS` defaults to `false`. Only when enabled are
+`probe_user_meal_endpoints` and the token-heavy raw `get_diary_detail` registered
+as MCP tools. Their internal client methods remain usable by normal diary and
+duplicate-check workflows. Health, compact diary and range tools remain
+available with diagnostics off.
+
+### `get_diary_range(account, date_from, date_to)`
+
+Read an inclusive range of up to 92 days (`YYYY-MM-DD`). Returns ordered daily
+rows with `logged`, energy in kcal, protein/carbohydrate/fat/fiber/sugar/salt in g,
+an energy target and weight in kg when available. Missing values remain `null`.
+Energy in kJ and nutrient amounts in mg are converted to the advertised units.
+Weight records are used only when explicitly associated with the requested date.
+
+The summary includes `days_with_record`, `empty_days`, `averages` and per-metric
+`average_sample_counts`. A day is logged if its detail contains diary entries or
+its nutrition summary contains positive intake; goals/weight alone do not count.
+Empty days are excluded from averages. Missing metrics on logged days are also
+excluded from that metric's average. Read failures fail the range rather than
+silently becoming empty days. `KT_MAX_CONCURRENCY` (default 4, range 1–32) limits
+parallel daily reads per account/client.
+
+### `get_diary_entries(account, date=None)`
+
+Returns the day's entries in compact form: `entry_guid`, `food_guid`,
+`is_recipe`, `meal_type`, `time`, `title`, `unit` (KT's display text such as
+`1,5 x kus (42 g)`), `quantity` with `quantity_unit` (`g`/`ml`, or `null` when
+the unit states no weight), `energy_kcal`, `protein_g`, `carbohydrate_g`,
+`fat_g`, `fiber_g`, `sugar_g` and `salt_g`. Entries are also grouped into
+non-empty `meals` (with the meal `title`) with meal and day `totals`.
+
+KT reports nutrients per diary entry as totals for the whole portion; energy in
+kJ is converted to kcal. A missing value (`null` in KT) makes the corresponding
+total `null` rather than an understated sum. The mapping was verified against a
+live diary: entry sums match KT's daily summary. Unknown structures fail with an
+error. `get_diary_detail` remains the raw diagnostic response.
+
+### `delete_diary_entry(account, date, entry_guid, commit=false)` (preview only)
+
+Checks that the entry exists in the requested day and previews its title,
+quantity and meal. Preview returns `write_supported: false`.
+
+**Deletion is blocked pending an authenticated browser capture of the deletion
+request.** The endpoint, HTTP method and payload are not known and no deletion
+endpoint has been invented. `commit=true` currently returns an error and makes
+no deletion request. To finish this feature, record the actual method, URL and
+body in DevTools on a test account, excluding cookies/credentials, document it
+here, and add mocked endpoint tests before enabling writes.
 
 ### `list_accounts`
 

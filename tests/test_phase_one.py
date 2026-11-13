@@ -1,6 +1,8 @@
 """Phase 1 regressions. All HTTP requests go to a local fake KT server."""
 
 import asyncio
+import json
+from pathlib import Path
 from collections import Counter
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -694,85 +696,9 @@ async def test_single_non_exact_result_is_not_auto_selected(kt, commit):
 
 
 # Anonymized excerpt of a live user/diary/{date}/get payload (2026-11).
-LIVE_DIARY = {
-    "date": 1794006000000,
-    "energyUnit": "kcal",
-    "times": [
-        {
-            "id": "1",
-            "title": "Snídaně",
-            "foodstuff": [
-                {
-                    "id": "e0000000000000000000000000000001",
-                    "type": "foodstuff",
-                    "guidType": "r0000000000000000000000000000001",
-                    "title": "Custom recipe",
-                    "unit": "306,23 x 1 g",
-                    "energy": "0,16",
-                    "time": "08:15",
-                    "editableUnit": False,
-                    "guidUserMeal": "r0000000000000000000000000000001",
-                    "guidRecipe": None,
-                    "isRecipe": False,
-                },
-                {
-                    "id": "e0000000000000000000000000000002",
-                    "type": "foodstuff",
-                    "guidType": "f000000000000001",
-                    "title": "Tea",
-                    "unit": "hrnek (220 ml)",
-                    "time": "08:15",
-                    "guidUserMeal": None,
-                },
-                {
-                    "id": "e0000000000000000000000000000003",
-                    "type": "foodstuff",
-                    "guidType": "f000000000000002",
-                    "title": "Roll",
-                    "unit": "1,5 x kus (42 g)",
-                    "time": "08:15",
-                },
-            ],
-            "notes": [],
-            "energyTotal": "366,66",
-        },
-        {"id": "4", "title": "Odpolední svačina", "foodstuff": [], "notes": []},
-        {
-            "id": "5",
-            "title": "Večeře",
-            "foodstuff": [
-                {
-                    "id": "e0000000000000000000000000000004",
-                    "type": "foodstuff",
-                    "guidType": "f000000000000003",
-                    "title": "Potatoes",
-                    "unit": "50 g",
-                    "time": "18:58",
-                },
-                {
-                    "id": "e0000000000000000000000000000005",
-                    "type": "foodstuff",
-                    "guidType": "f000000000000004",
-                    "title": "Beer",
-                    "unit": "3 x sklenice (500 ml)",
-                    "time": "18:58",
-                },
-            ],
-            "notes": [],
-        },
-    ],
-    "activities": [
-        {
-            "id": "a0000000000000000000000000000001",
-            "type": "activity",
-            "guidType": None,
-            "unit": "44 min",
-        }
-    ],
-    "notes": [],
-    "energyTotal": 0,
-    "foodstuffCount": 5,
-}
+LIVE_DIARY = json.loads(
+    (Path(__file__).parent / "fixtures" / "diary_live_anonymized.json").read_text()
+)["data"]
 
 
 def test_live_diary_payload_is_normalized():

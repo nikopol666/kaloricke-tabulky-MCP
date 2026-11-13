@@ -22,5 +22,5 @@ def test_ci_docker_build_does_not_push() -> None:
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "push: false" in text
-    assert "ghcr.io/nikopol666/kaloricke-tabulky-mcp:ci" in text
+    assert "ghcr.io/michalprouza/kaloricke-tabulky-mcp:ci" in text
 

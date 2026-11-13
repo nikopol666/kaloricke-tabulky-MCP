@@ -152,14 +152,12 @@ def recipe_portion(payload: dict[str, Any]) -> dict[str, Any]:
     return portion
 
 
-def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize the diary rows of one day; raise ``ValueError`` on unknown shapes."""
+def _diary_rows(detail: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Return validated ``(meal, row)`` pairs; raise ``ValueError`` on unknown shapes."""
     data = detail.get("data") if isinstance(detail, dict) else None
     if not isinstance(data, dict) or not isinstance(data.get("times"), list):
-        raise ValueError(
-            "Unrecognized diary structure; duplicate check cannot be completed"
-        )
-    entries: list[dict[str, Any]] = []
+        raise ValueError("Unrecognized diary structure")
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for meal in data["times"]:
         if not isinstance(meal, dict) or str(meal.get("id")) not in MEAL_IDS:
             raise ValueError("Unrecognized diary meal identifier")
@@ -171,23 +169,120 @@ def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
         for row in rows:
             if not isinstance(row, dict):
                 raise ValueError("Unsupported diary entry structure")
-            entry_guid, food_guid = row.get("id"), row.get("guidType")
-            if not all(str(v or "").strip() for v in (entry_guid, food_guid)):
-                raise ValueError(
-                    "Diary entry lacks entry or food identity for duplicate check"
-                )
-            entries.append(
-                {
-                    "entry_guid": str(entry_guid),
-                    "food_guid": str(food_guid),
-                    "meal_type": str(meal["id"]),
-                    "title": row.get("title"),
-                    "time": row.get("time"),
-                    "unit": row.get("unit"),
-                    "portion": parse_unit_text(row.get("unit")),
-                }
-            )
-    return entries
+            if not all(str(row.get(key) or "").strip() for key in ("id", "guidType")):
+                raise ValueError("Diary entry lacks entry or food identity")
+            pairs.append((meal, row))
+    return pairs
+
+
+def duplicate_entries(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize the diary rows of one day for the duplicate guard."""
+    return [
+        {
+            "entry_guid": str(row["id"]),
+            "food_guid": str(row["guidType"]),
+            "meal_type": str(meal["id"]),
+            "title": row.get("title"),
+            "time": row.get("time"),
+            "unit": row.get("unit"),
+            "portion": parse_unit_text(row.get("unit")),
+        }
+        for meal, row in _diary_rows(detail)
+    ]
+
+
+# Row nutrient values are totals for the whole entry (verified on a live diary:
+# 63 g of a 286 kcal/100 g roll is shown as energy "180").
+COMPACT_NUTRIENTS = {
+    "protein_g": "protein",
+    "carbohydrate_g": "carbohydrate",
+    "fat_g": "fat",
+    "fiber_g": "fiber",
+    "sugar_g": "sugar",
+    "salt_g": "salt",
+}
+TOTAL_FIELDS = ("energy_kcal", *COMPACT_NUTRIENTS)
+
+
+def _optional_total(value: Any, what: str) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    number = _maybe_number(value)
+    if number is None or number < 0:
+        raise ValueError(f"Invalid diary {what}")
+    return number
+
+
+def _energy_kcal(row: dict[str, Any]) -> float | None:
+    energy = _optional_total(row.get("energy"), "energy")
+    unit = str(row.get("energyUnit") or "kcal").strip().casefold()
+    if energy is None:
+        return None
+    if unit == "kcal":
+        return energy
+    if unit == "kj":
+        return energy / 4.184
+    raise ValueError(f"Unsupported diary energy unit: {unit}")
+
+
+def _totals(entries: list[dict[str, Any]]) -> dict[str, float | None]:
+    # A missing value makes the total unknown rather than understated.
+    return {
+        key: (
+            round(sum(row[key] for row in entries), 3)
+            if all(row[key] is not None for row in entries)
+            else None
+        )
+        for key in TOTAL_FIELDS
+    }
+
+
+def compact_diary(detail: dict[str, Any]) -> dict[str, Any]:
+    """Compact entries of one day grouped by meal, with meal and day totals."""
+    entries: list[dict[str, Any]] = []
+    titles: dict[str, Any] = {}
+    seen: set[str] = set()
+    for meal, row in _diary_rows(detail):
+        entry_guid = str(row["id"])
+        if entry_guid in seen:
+            raise ValueError("Duplicate diary entry identifiers")
+        seen.add(entry_guid)
+        title = row.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("Missing diary entry title")
+        portion = parse_unit_text(row.get("unit"))
+        meal_type = str(meal["id"])
+        titles.setdefault(meal_type, meal.get("title"))
+        entries.append(
+            {
+                "entry_guid": entry_guid,
+                "food_guid": str(row["guidType"]),
+                "is_recipe": bool(row.get("guidUserMeal") or row.get("guidRecipe")),
+                "meal_type": meal_type,
+                "time": row.get("time"),
+                "title": title,
+                "unit": row["unit"],
+                "quantity": portion["quantity"],
+                "quantity_unit": portion["dimension"],
+                "energy_kcal": _energy_kcal(row),
+                **{
+                    key: _optional_total(row.get(field), field)
+                    for key, field in COMPACT_NUTRIENTS.items()
+                },
+            }
+        )
+    meals = []
+    for meal_type in sorted({row["meal_type"] for row in entries}):
+        rows = [row for row in entries if row["meal_type"] == meal_type]
+        meals.append(
+            {
+                "meal_type": meal_type,
+                "title": titles.get(meal_type),
+                "entries": rows,
+                "totals": _totals(rows),
+            }
+        )
+    return {"entries": entries, "meals": meals, "totals": _totals(entries)}
 
 
 def resolved_portion(resolved: dict[str, Any]) -> dict[str, Any]:
